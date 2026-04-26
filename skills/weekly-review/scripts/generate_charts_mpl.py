@@ -735,10 +735,8 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(script_dir, '..', 'data')
     output_dir = os.path.join(script_dir, '..', 'output')
-    workspace_output = r'c:\Users\Administrator\WorkBuddy\20260423133038\output'
     
     os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(workspace_output, exist_ok=True)
     
     # 加载数据
     try:
@@ -771,15 +769,12 @@ def main():
     L_chart8_heatmap(ld, output_dir)
     L_chart9_pbc_repo(output_dir, data_dir=data_dir)
     
-    # 复制到工作区
-    print('\n[3] Copy to workspace...')
-    import shutil
-    for fn in os.listdir(output_dir):
-        if fn.endswith('.png'):
-            src = os.path.join(output_dir, fn)
-            dst = os.path.join(workspace_output, fn)
-            shutil.copy2(src, dst)
-            print(f"  + {fn}")
+    # 图表已保存到output_dir（与HTML同目录，相对路径引用正确）
+    print('\n[3] Output directory contents:')
+    import glob
+    png_files = glob.glob(os.path.join(output_dir, '*.png'))
+    for pf in png_files:
+        print(f"  + {os.path.basename(pf)}")
     
     print(f'\nDone! Output: {output_dir}')
 

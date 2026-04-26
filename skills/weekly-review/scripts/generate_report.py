@@ -249,6 +249,27 @@
                 </tbody>
             </table>
 
+            <!-- 本周走势图 -->
+            <h3 style="color:#fff;margin:20px 0 15px;">本周走势图</h3>
+            <div class="chart-grid">
+                <div class="chart-item">
+                    <img src="chart1_a_stock.png" alt="A股指数">
+                    <div class="title">A股5大指数走势（基准=100）</div>
+                </div>
+                <div class="chart-item">
+                    <img src="chart2_global.png" alt="全球市场">
+                    <div class="title">全球市场走势（基准=100）</div>
+                </div>
+                <div class="chart-item">
+                    <img src="chart3_commodity.png" alt="商品期货">
+                    <div class="title">商品期货走势</div>
+                </div>
+                <div class="chart-item">
+                    <img src="chart4_options.png" alt="期权IV">
+                    <div class="title">期权隐含波动率（%）</div>
+                </div>
+            </div>
+
             <!-- 涨跌停统计 -->
             <div style="margin-top:25px;display:flex;gap:30px;">
                 <div style="background:#252540;padding:15px 25px;border-radius:8px;">

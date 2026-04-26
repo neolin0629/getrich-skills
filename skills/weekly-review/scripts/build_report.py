@@ -9,8 +9,8 @@ import numpy as np
 # 路径配置
 SKILL_DIR = r'C:\Users\Administrator\.workbuddy\skills\weekly-review'
 DATA_DIR = os.path.join(SKILL_DIR, 'data')
-OUTPUT_DIR = r'C:\Users\Administrator\WorkBuddy\20260423133038\output'
-WORKSPACE = r'c:\Users\Administrator\WorkBuddy\20260423133038'
+OUTPUT_DIR = os.path.join(SKILL_DIR, 'output')
+WORKSPACE = r'c:\Users\Administrator\WorkBuddy\20260425114014'
 TEMPLATE_PATH = os.path.join(SKILL_DIR, 'scripts', 'generate_report.py')
 
 # 颜色（中国股市惯例）
@@ -200,6 +200,8 @@ def get_vix(wd):
 
 def main():
     print('生成周复盘报告...')
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(WORKSPACE, exist_ok=True)
     
     # 加载数据
     wd, ld = load_data()
@@ -305,14 +307,31 @@ def main():
     
     # 生成报告
     report_date = datetime.now().strftime('%Y-%m-%d')
-    report_path = os.path.join(WORKSPACE, f'weekly-review-{report_date}.html')
     
-    with open(report_path, 'w', encoding='utf-8') as f:
+    # 报告同时保存到: 1) 工作区  2) skill output目录(与图片同目录)  3) E盘
+    report_workspace = os.path.join(WORKSPACE, f'weekly-review-{report_date}.html')
+    report_output = os.path.join(OUTPUT_DIR, f'weekly-review-{report_date}.html')
+    
+    with open(report_workspace, 'w', encoding='utf-8') as f:
+        f.write(template)
+    with open(report_output, 'w', encoding='utf-8') as f:
         f.write(template)
     
-    size = os.path.getsize(report_path) // 1024
-    print(f'报告已生成: {report_path} ({size}KB)')
-    return report_path
+    # 同步到E盘
+    try:
+        e_dir = r'E:\每天复盘和晨报'
+        os.makedirs(e_dir, exist_ok=True)
+        e_path = os.path.join(e_dir, f'weekly-review-{report_date}.html')
+        with open(e_path, 'w', encoding='utf-8') as f:
+            f.write(template)
+        print(f'报告已同步到: {e_path}')
+    except Exception as e:
+        print(f'E盘同步失败: {e}')
+    
+    size = os.path.getsize(report_output) // 1024
+    print(f'报告已生成: {report_output} ({size}KB)')
+    print(f'报告已保存: {report_workspace}')
+    return report_output
 
 if __name__ == '__main__':
     main()
