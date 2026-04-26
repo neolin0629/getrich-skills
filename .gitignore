@@ -5,5 +5,5 @@
 .DS_Store
 .venv/
 __pycache__/
-*.pyc
-skills/wechat-article-capture/config.json
+*.py[cod]
+*$py.class
