@@ -1,4 +1,9 @@
 .claude/
+.codex/
 .git/
 .workbuddy/
 .DS_Store
+.venv/
+__pycache__/
+*.pyc
+skills/wechat-article-capture/config.json
