@@ -7,14 +7,16 @@ description: 微信公众号文章抓取与入库。将微信文章URL转换为M
 
 ## 功能说明
 
-接收微信公众号文章 URL → 抓取全文内容 → 下载图片到本地 → 转换为 Markdown → 存入指定目录（默认 `5-收件箱/微信收藏/`）
+接收微信公众号文章 URL → 抓取全文内容 → 下载图片到本地 → 转换为 Markdown → 存入指定目录。
+
+默认保存到当前工作目录下的 `wechat-captures/`。如需固定个人收件箱路径，可复制 `config.example.json` 为 `config.json` 后修改 `output_dir`。
 
 **代码块格式由 AI 事后整理**（微信每行代码是独立HTML标签，脚本自动合并不可靠）
 
 ## 输入
 
 - **URL**：微信公众号文章完整地址（`https://mp.weixin.qq.com/s/xxx`）
-- **目标目录**（可选）：默认 `C:\Users\Administrator\Nutstore\1\Miller\5-收件箱\微信收藏\`
+- **目标目录**（可选）：默认 `wechat-captures/`
 - **文件名**（可选）：默认用文章标题自动命名
 
 ## 输出
@@ -22,7 +24,7 @@ description: 微信公众号文章抓取与入库。将微信文章URL转换为M
 `.md` 文件 + `配图/` 子目录，文件结构示例：
 
 ```
-5-收件箱/微信收藏/
+wechat-captures/
 ├── 量化小助手：LSTM在日内交易中的实战应用.md
 └── 配图/
     ├── img_000_4d8216f7f628.gif
@@ -39,14 +41,40 @@ source: "微信"
 author:
   - "公众号名称"
 created: YYYY-MM-DD
-tags: ["公众号", "待分类"]
-category: 待分类
-status: inbox
+tags: ["公众号"]
+category: "待分类"
+status: "inbox"
 description: "文章摘要"
 ---
 
 正文内容（Markdown格式，图片引用本地配图/路径）
 ```
+
+## 配置
+
+配置优先级：CLI 参数 > 环境变量 > `config.json` > 内置默认值。
+
+本地配置文件默认位置为 skill 目录下的 `config.json`，可从 `config.example.json` 复制生成。`config.json` 属于个人配置，不入库。
+
+支持配置项：
+
+- `output_dir`：Markdown 输出目录
+- `image_dir_name`：图片子目录名，默认 `配图`
+- `source`：frontmatter 的来源字段，默认 `微信`
+- `default_tags`：默认标签，默认 `["公众号"]`
+- `category`：frontmatter 分类，默认 `待分类`
+- `status`：frontmatter 状态，默认 `inbox`
+- `timeout`：请求超时时间，单位秒
+- `filename_max_length`：自动文件名最大长度
+- `headers`：请求头，会与默认 headers 合并
+
+常用环境变量：
+
+- `WECHAT_CAPTURE_CONFIG`：指定配置文件路径
+- `WECHAT_CAPTURE_OUTPUT_DIR`：指定输出目录
+- `WECHAT_CAPTURE_IMAGE_DIR_NAME`：指定图片子目录名
+- `WECHAT_CAPTURE_TIMEOUT`：指定请求超时时间
+- `WECHAT_CAPTURE_DEFAULT_TAGS`：指定默认标签，支持逗号分隔或 JSON 数组
 
 ## 使用方式
 
@@ -54,15 +82,21 @@ description: "文章摘要"
 发送公众号文章 URL，我会自动完成抓取、入库、整理代码块。
 
 ### 方式二：命令行调用
-```powershell
-# 基本用法（默认保存到 5-收件箱）
-python "C:\Users\Administrator\.workbuddy\skills\wechat-article-capture\scripts\capture.py" "<文章URL>"
+```bash
+# 基本用法（默认保存到当前目录 wechat-captures/）
+python skills/wechat-article-capture/scripts/capture.py "<文章URL>"
 
 # 指定保存目录
-python "C:\Users\Administrator\.workbuddy\skills\wechat-article-capture\scripts\capture.py" "<文章URL>" "C:\目标目录"
+python skills/wechat-article-capture/scripts/capture.py "<文章URL>" --output-dir "./inbox/wechat"
 
 # 指定文件名
-python "C:\Users\Administrator\.workbuddy\skills\wechat-article-capture\scripts\capture.py" "<文章URL>" "" "自定义文件名"
+python skills/wechat-article-capture/scripts/capture.py "<文章URL>" --filename "自定义文件名"
+
+# 指定配置文件
+python skills/wechat-article-capture/scripts/capture.py "<文章URL>" --config "./wechat-config.json"
+
+# 兼容旧位置参数用法
+python skills/wechat-article-capture/scripts/capture.py "<文章URL>" "./inbox/wechat" "自定义文件名"
 ```
 
 ## 执行流程
@@ -73,7 +107,7 @@ python "C:\Users\Administrator\.workbuddy\skills\wechat-article-capture\scripts\
 3. 提取：标题、公众号名、发布日期、摘要、hashtag标签
 4. 定位正文区域，提取 `<img data-src>` 图片URL
 5. 用 `__IMG_N__` 标记记录图片位置，HTML → Markdown 转换
-6. 下载图片到 `配图/` 子目录，替换标记为本地引用 `![](配图/xxx.jpg)`
+6. 下载图片到配置的图片子目录，替换标记为本地引用 `![](配图/xxx.jpg)`
 7. 清理页脚（微信号、网址、点赞提示）
 8. 生成 frontmatter，写入目标文件
 9. 输出文件路径：`[OK] 已保存: <filepath>`
@@ -90,8 +124,9 @@ python "C:\Users\Administrator\.workbuddy\skills\wechat-article-capture\scripts\
 ## 技术说明
 
 - 使用 `requests` + `BeautifulSoup` + `html2text` 抓取
+- 如运行环境缺少依赖，先执行 `python -m pip install requests beautifulsoup4 html2text`
 - **仅限公开已发布文章**，无需登录
-- **图片本地化**：从 `<img data-src>` 提取 `mmbiz.qpic.cn` 真实 URL，下载到 `配图/` 子目录，markdown 中引用本地路径
+- **图片本地化**：从 `<img data-src>` 提取 `mmbiz.qpic.cn` 真实 URL，下载到配置的图片子目录，markdown 中引用本地路径
 - 图片扩展名从 `wx_fmt` 查询参数推断，并根据 Content-Type 修正
 - **代码块由 AI 整理**：微信每行代码是独立HTML标签，html2text 转换后代码行被正文分隔。AI 通过重新请求文章HTML，从 `code-snippet__fix` 结构中提取完整代码，替换到 markdown 中
-- 文件名自动清理非法字符，长度限制 200 字
+- 文件名自动清理非法字符，默认长度限制 200 字，可通过配置调整

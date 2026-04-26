@@ -5,30 +5,43 @@
 用法: python capture.py <url> [输出目录] [文件名]
 """
 
-import sys
+from __future__ import annotations
+
+import argparse
+import hashlib
+import html as html_lib
+import json
 import os
+from pathlib import Path
 import re
-import requests
-from bs4 import BeautifulSoup
-import html2text
+import sys
 from datetime import datetime
 import urllib.parse
-import hashlib
 
-# ---------- 配置 ----------
-DEFAULT_OUTPUT_DIR = r"C:\Users\Administrator\Nutstore\1\Miller\5-收件箱\微信收藏"
-USER_AGENT = (
+
+SKILL_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
-HEADERS = {
-    "User-Agent": USER_AGENT,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    "Referer": "https://mp.weixin.qq.com/",
+DEFAULT_CONFIG = {
+    "output_dir": "wechat-captures",
+    "image_dir_name": "配图",
+    "source": "微信",
+    "default_tags": ["公众号"],
+    "category": "待分类",
+    "status": "inbox",
+    "timeout": 15,
+    "filename_max_length": 200,
+    "headers": {
+        "User-Agent": DEFAULT_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": "https://mp.weixin.qq.com/",
+    },
 }
 
-TIMEOUT = 15
+ENV_PREFIX = "WECHAT_CAPTURE_"
 
 
 def extract_article_id(url: str) -> str:
@@ -44,18 +57,24 @@ def extract_article_id(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()[:12]
 
 
-def sanitize_filename(name: str) -> str:
+def sanitize_filename(name: str, max_length: int = 200) -> str:
     """移除文件名中的非法字符"""
     name = re.sub(r'[\\/:*?"<>|]', '_', name)
     name = name.strip()
-    return name[:200] if name else "untitled"
+    return name[:max_length] if name else "untitled"
 
 
 def parse_date(date_str: str) -> str:
     """解析各种日期格式，返回 YYYY-MM-DD"""
     patterns = [
-        (r'(\d{4})年(\d{1,2})月(\d{1,2})日', r'\1-\2-\3'),
-        (r'(\d{4})-(\d{1,2})-(\d{1,2})', r'\1-\2-\3'),
+        (
+            r'(\d{4})年(\d{1,2})月(\d{1,2})日',
+            lambda m: f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}",
+        ),
+        (
+            r'(\d{4})-(\d{1,2})-(\d{1,2})',
+            lambda m: f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}",
+        ),
         (r'([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})', lambda m: datetime.strptime(
             f"{m.group(3)} {m.group(1)} {m.group(2)}", "%Y %b %d").strftime("%Y-%m-%d")),
     ]
@@ -68,9 +87,156 @@ def parse_date(date_str: str) -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def fetch_article(url: str):
+def parse_timestamp_date(html: str) -> str | None:
+    """从微信脚本变量中解析发布时间戳。"""
+    patterns = [
+        r'var\s+create_time\s*=\s*["\']?(\d{10})["\']?',
+        r'var\s+ct\s*=\s*["\']?(\d{10})["\']?',
+        r'createTimestamp\s*=\s*["\']?(\d{10})["\']?',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html)
+        if match:
+            return datetime.fromtimestamp(int(match.group(1))).strftime("%Y-%m-%d")
+    return None
+
+
+def clean_meta_text(value: str) -> str:
+    """还原微信元数据中的 HTML 实体和 JS 转义。"""
+    value = value.replace(r'\x26', '&')
+    return html_lib.unescape(value).strip()
+
+
+def _merge_config(base: dict, override: dict) -> dict:
+    """合并配置，headers 单独做浅合并。"""
+    merged = dict(base)
+    headers = dict(base.get("headers", {}))
+    for key, value in override.items():
+        if value is None:
+            continue
+        if key == "headers" and isinstance(value, dict):
+            headers.update({str(k): str(v) for k, v in value.items() if v is not None})
+        else:
+            merged[key] = value
+    merged["headers"] = headers
+    return merged
+
+
+def _load_json_config(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"配置文件必须是 JSON object: {path}")
+    return data
+
+
+def _parse_list_env(value: str) -> list[str]:
+    value = value.strip()
+    if not value:
+        return []
+    if value.startswith("["):
+        parsed = json.loads(value)
+        if not isinstance(parsed, list):
+            raise ValueError("default_tags 环境变量 JSON 值必须是数组")
+        return [str(item) for item in parsed]
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _env_config() -> dict:
+    env = os.environ
+    config = {}
+    simple_keys = {
+        "output_dir": "OUTPUT_DIR",
+        "image_dir_name": "IMAGE_DIR_NAME",
+        "source": "SOURCE",
+        "category": "CATEGORY",
+        "status": "STATUS",
+    }
+    for key, suffix in simple_keys.items():
+        value = env.get(f"{ENV_PREFIX}{suffix}")
+        if value:
+            config[key] = value
+
+    if env.get(f"{ENV_PREFIX}TIMEOUT"):
+        config["timeout"] = int(env[f"{ENV_PREFIX}TIMEOUT"])
+    if env.get(f"{ENV_PREFIX}FILENAME_MAX_LENGTH"):
+        config["filename_max_length"] = int(env[f"{ENV_PREFIX}FILENAME_MAX_LENGTH"])
+    if env.get(f"{ENV_PREFIX}DEFAULT_TAGS"):
+        config["default_tags"] = _parse_list_env(env[f"{ENV_PREFIX}DEFAULT_TAGS"])
+
+    return config
+
+
+def _cli_config(args: argparse.Namespace) -> dict:
+    config = {}
+    output_dir = args.output_dir_option or args.output_dir
+    if output_dir:
+        config["output_dir"] = output_dir
+    if args.image_dir_name:
+        config["image_dir_name"] = args.image_dir_name
+    if args.timeout is not None:
+        config["timeout"] = args.timeout
+    return config
+
+
+def _resolve_config_path(args: argparse.Namespace) -> Path:
+    config_path = args.config or os.environ.get(f"{ENV_PREFIX}CONFIG")
+    if config_path:
+        return Path(config_path).expanduser()
+    return SKILL_DIR / "config.json"
+
+
+def load_config(args: argparse.Namespace) -> dict:
+    config_path = _resolve_config_path(args)
+    config = _merge_config(DEFAULT_CONFIG, _load_json_config(config_path))
+    config = _merge_config(config, _env_config())
+    config = _merge_config(config, _cli_config(args))
+
+    config["timeout"] = int(config.get("timeout") or DEFAULT_CONFIG["timeout"])
+    config["filename_max_length"] = int(
+        config.get("filename_max_length") or DEFAULT_CONFIG["filename_max_length"]
+    )
+    if not isinstance(config.get("default_tags"), list):
+        config["default_tags"] = DEFAULT_CONFIG["default_tags"]
+    config["default_tags"] = [str(tag) for tag in config["default_tags"] if str(tag).strip()]
+    config["output_dir"] = Path(str(config["output_dir"])).expanduser()
+    config["image_dir_name"] = str(config.get("image_dir_name") or "配图")
+    return config
+
+
+def is_wechat_article_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    return parsed.scheme in {"http", "https"} and hostname == "mp.weixin.qq.com"
+
+
+def check_dependencies() -> list[str]:
+    missing = []
+    for module_name, package_name in [
+        ("requests", "requests"),
+        ("bs4", "beautifulsoup4"),
+        ("html2text", "html2text"),
+    ]:
+        try:
+            __import__(module_name)
+        except ModuleNotFoundError:
+            missing.append(package_name)
+    return missing
+
+
+def build_session(headers: dict) -> requests.Session:
+    import requests
+
+    session = requests.Session()
+    session.headers.update(headers)
+    return session
+
+
+def fetch_article(session, url: str, timeout: int) -> str:
     """抓取微信文章页面"""
-    resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT, allow_redirects=True)
+    resp = session.get(url, timeout=timeout, allow_redirects=True)
     resp.raise_for_status()
     resp.encoding = 'utf-8'
     return resp.text
@@ -78,13 +244,15 @@ def fetch_article(url: str):
 
 def extract_metadata(html: str) -> dict:
     """从HTML中提取元数据"""
+    from bs4 import BeautifulSoup
+
     soup = BeautifulSoup(html, 'html.parser')
     meta = {}
 
     # 标题
     og_title = soup.find('meta', attrs={'property': 'og:title'})
     if og_title:
-        meta['title'] = og_title.get('content', '').strip()
+        meta['title'] = clean_meta_text(og_title.get('content', ''))
     if not meta.get('title'):
         h1 = soup.find('h1', class_='rich_media_title')
         if h1:
@@ -93,7 +261,7 @@ def extract_metadata(html: str) -> dict:
     # 描述/摘要
     og_desc = soup.find('meta', attrs={'property': 'og:description'})
     if og_desc:
-        meta['description'] = og_desc.get('content', '').strip()
+        meta['description'] = clean_meta_text(og_desc.get('content', ''))
 
     # 作者/公众号名
     full_text = soup.get_text()
@@ -115,8 +283,10 @@ def extract_metadata(html: str) -> dict:
         if not author_tag:
             author_tag = soup.find('span', class_=re.compile(r'rich_media_meta.*nickname'))
         if author_tag:
-            meta['author'] = author_tag.get_text(strip=True)
-            author_found = True
+            author = author_tag.get('content', '') or author_tag.get_text(strip=True)
+            if author:
+                meta['author'] = clean_meta_text(author)
+                author_found = True
 
     if not author_found:
         meta['author'] = '未知公众号'
@@ -127,14 +297,19 @@ def extract_metadata(html: str) -> dict:
         date_tag = soup.find('span', class_='rich_media_meta rich_media_meta_text')
     if date_tag:
         date_text = date_tag.get_text(strip=True)
-        meta['date'] = parse_date(date_text)
+        if date_text:
+            meta['date'] = parse_date(date_text)
+    if not meta.get('date'):
+        timestamp_date = parse_timestamp_date(html)
+        if timestamp_date:
+            meta['date'] = timestamp_date
     if not meta.get('date'):
         meta['date'] = datetime.now().strftime("%Y-%m-%d")
 
     # 描述/摘要
     desc = soup.find('meta', attrs={'name': 'description'})
     if desc and not meta.get('description'):
-        meta['description'] = desc.get('content', '').strip()
+        meta['description'] = clean_meta_text(desc.get('content', ''))
 
     # 自动提取文末 hashtag 作为标签
     full_text = soup.get_text()
@@ -183,18 +358,24 @@ def _get_safe_filename(url: str, idx: int) -> str:
     return f"img_{idx:03d}_{safe}{ext}"
 
 
-def _download_images(img_urls: list, article_dir: str, session_headers: dict) -> dict:
+def _download_images(
+    img_urls: list,
+    article_dir: Path,
+    image_dir_name: str,
+    session: requests.Session,
+    timeout: int,
+) -> dict:
     """
-    下载图片到 article_dir/配图/ 目录。
+    下载图片到 article_dir/image_dir_name/ 目录。
     img_urls: 已提取的图片 URL 列表。
     返回 {序号: 本地路径} 映射。
     """
     if not img_urls:
-        print(f"[配图] 未发现可下载的图片URL")
+        print("[配图] 未发现可下载的图片URL")
         return {}
 
-    img_dir = os.path.join(article_dir, '配图')
-    os.makedirs(img_dir, exist_ok=True)
+    img_dir = article_dir / image_dir_name
+    img_dir.mkdir(parents=True, exist_ok=True)
 
     idx_to_local = {}
     valid_count = sum(1 for u in img_urls if u)
@@ -205,17 +386,15 @@ def _download_images(img_urls: list, article_dir: str, session_headers: dict) ->
             continue
 
         fname = _get_safe_filename(src, idx)
-        fpath = os.path.join(img_dir, fname)
-        ext = os.path.splitext(fname)[1]
+        fpath = img_dir / fname
+        ext = Path(fname).suffix
 
-        if os.path.exists(fpath):
+        if fpath.exists():
             idx_to_local[idx] = fpath
             continue
 
         try:
-            img_headers = dict(session_headers)
-            img_headers['Referer'] = 'https://mp.weixin.qq.com/'
-            resp = requests.get(src, headers=img_headers, timeout=20, stream=True)
+            resp = session.get(src, timeout=timeout, stream=True)
             resp.raise_for_status()
             content_type = resp.headers.get('Content-Type', '')
             if 'text' in content_type and 'html' in content_type:
@@ -235,10 +414,10 @@ def _download_images(img_urls: list, article_dir: str, session_headers: dict) ->
             elif 'jpeg' in content_type or 'jpg' in content_type:
                 actual_ext = '.jpg'
             if actual_ext != ext:
-                fname = fname.replace(ext, actual_ext)
-                fpath = os.path.join(img_dir, fname)
+                fname = f"{Path(fname).stem}{actual_ext}"
+                fpath = img_dir / fname
 
-            with open(fpath, 'wb') as f:
+            with fpath.open('wb') as f:
                 f.write(chunk)
                 for chunk2 in resp.iter_content(8192):
                     f.write(chunk2)
@@ -254,19 +433,19 @@ def _download_images(img_urls: list, article_dir: str, session_headers: dict) ->
     else:
         print(f"[配图] 全部下载失败")
         try:
-            os.rmdir(img_dir)
+            img_dir.rmdir()
         except Exception:
             pass
     return idx_to_local
 
 
-def _replace_image_markers(md: str, img_map: dict, article_dir: str) -> str:
+def _replace_image_markers(md: str, img_map: dict, article_dir: Path) -> str:
     """将 markdown 中的 __IMG_N__ 标记替换为本地图片引用"""
     for idx_str, local_path in img_map.items():
         try:
-            rel_path = os.path.relpath(local_path, article_dir).replace('\\', '/')
+            rel_path = Path(local_path).relative_to(article_dir).as_posix()
         except ValueError:
-            rel_path = local_path.replace('\\', '/')
+            rel_path = Path(local_path).as_posix()
         marker = f'__IMG_{idx_str}__'
         md = md.replace(marker, f'![]({rel_path})')
     # 清理未替换的标记
@@ -276,6 +455,8 @@ def _replace_image_markers(md: str, img_map: dict, article_dir: str) -> str:
 
 def extract_content(soup: BeautifulSoup):
     """提取正文内容区域，返回 (markdown, img_urls)"""
+    import html2text
+
     # 微信文章主体
     content_div = soup.find('div', id='js_content') or soup.find('div', class_='rich_media_content')
 
@@ -349,7 +530,11 @@ def extract_content(soup: BeautifulSoup):
     return md, img_urls
 
 
-def build_frontmatter(meta: dict) -> str:
+def _yaml_string(value: str) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def build_frontmatter(meta: dict, config: dict) -> str:
     """构建 YAML frontmatter"""
     title = meta.get('title', '未命名文章')
     author = meta.get('author', '未知公众号')
@@ -357,34 +542,57 @@ def build_frontmatter(meta: dict) -> str:
     description = meta.get('description', '')
     tags = meta.get('tags', [])
 
-    default_tags = ['公众号']
+    default_tags = config.get("default_tags", [])
     all_tags = (tags + [t for t in default_tags if t not in (tags or [])]) if tags else default_tags
-    tags_str = ', '.join(f'"{t}"' for t in all_tags) if all_tags else ''
-
-    description = description.replace('"', '\\"')
+    tags_str = json.dumps(all_tags, ensure_ascii=False)
 
     fm = f'''---
-title: "{title}"
-source: "微信"
+title: {_yaml_string(title)}
+source: {_yaml_string(config.get("source", "微信"))}
 author:
-  - "{author}"
+  - {_yaml_string(author)}
 created: {date}
-tags: [{tags_str}]
-category: 待分类
-status: inbox
-description: "{description}"
+tags: {tags_str}
+category: {_yaml_string(config.get("category", "待分类"))}
+status: {_yaml_string(config.get("status", "inbox"))}
+description: {_yaml_string(description)}
 ---
 
 '''
     return fm
 
 
-def save_markdown(filepath: str, content: str):
+def save_markdown(filepath: Path, content: str):
     """确保目录存在，写入文件"""
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    with open(filepath, 'w', encoding='utf-8') as f:
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    with filepath.open('w', encoding='utf-8') as f:
         f.write(content)
     print(f"[OK] 已保存: {filepath}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="抓取微信公众号文章并保存为 Markdown。")
+    parser.add_argument("url", help="微信公众号文章 URL")
+    parser.add_argument("output_dir", nargs="?", help="兼容旧用法：输出目录")
+    parser.add_argument("filename", nargs="?", help="兼容旧用法：自定义文件名")
+    parser.add_argument("--output-dir", dest="output_dir_option", help="输出目录")
+    parser.add_argument("--filename", dest="filename_option", help="自定义文件名")
+    parser.add_argument("--config", help="配置文件路径，默认读取 skill 目录下的 config.json")
+    parser.add_argument("--image-dir-name", help="图片子目录名，默认 配图")
+    parser.add_argument("--timeout", type=int, help="请求超时时间，单位秒")
+    return parser
+
+
+def _resolve_output_path(output_dir: Path, filename: str) -> Path:
+    filepath = output_dir / filename
+    if filepath.exists():
+        base = filepath.stem
+        ext = filepath.suffix
+        counter = 1
+        while filepath.exists():
+            filepath = output_dir / f"{base}_{counter}{ext}"
+            counter += 1
+    return filepath
 
 
 def main():
@@ -395,23 +603,33 @@ def main():
     except Exception:
         pass
 
-    if len(sys.argv) < 2:
-        print("用法: python capture.py <url> [输出目录] [文件名]")
-        sys.exit(1)
+    parser = build_parser()
+    args = parser.parse_args()
+    url = args.url.strip()
 
-    url = sys.argv[1].strip()
-
-    if 'mp.weixin.qq.com' not in url:
+    if not is_wechat_article_url(url):
         print("[错误] 必须是微信公众号文章地址 (mp.weixin.qq.com)")
         sys.exit(1)
 
-    output_dir = sys.argv[2].strip() if len(sys.argv) > 2 else DEFAULT_OUTPUT_DIR
-    custom_filename = sys.argv[3].strip() if len(sys.argv) > 3 else None
+    try:
+        config = load_config(args)
+    except Exception as e:
+        print(f"[错误] 读取配置失败: {e}")
+        sys.exit(1)
+
+    missing = check_dependencies()
+    if missing:
+        print(f"[错误] 缺少依赖: {', '.join(missing)}")
+        print(f"[提示] 请先安装: python -m pip install {' '.join(missing)}")
+        sys.exit(1)
+
+    custom_filename = (args.filename_option or args.filename or "").strip() or None
+    session = build_session(config["headers"])
 
     print(f"[抓取中] {url}")
 
     # 1. 抓取
-    html = fetch_article(url)
+    html = fetch_article(session, url, config["timeout"])
 
     # 2. 提取元数据
     meta, soup = extract_metadata(html)
@@ -431,32 +649,30 @@ def main():
 
     # 4. 确定保存路径
     if custom_filename:
-        filename = sanitize_filename(custom_filename)
+        filename = sanitize_filename(custom_filename, config["filename_max_length"])
         if not filename.endswith('.md'):
             filename += '.md'
     else:
-        filename = sanitize_filename(title) + '.md'
+        filename = sanitize_filename(title, config["filename_max_length"]) + '.md'
 
-    filepath = os.path.join(output_dir, filename)
+    filepath = _resolve_output_path(config["output_dir"], filename)
+    article_dir = filepath.parent
 
-    if os.path.exists(filepath):
-        base, ext = os.path.splitext(filename)
-        counter = 1
-        while os.path.exists(filepath):
-            filepath = os.path.join(output_dir, f"{base}_{counter}{ext}")
-            counter += 1
-
-    article_dir = os.path.dirname(filepath)
-
-    # 5. 下载图片到 配图/ 子目录
-    img_map = _download_images(img_urls, article_dir, HEADERS)
+    # 5. 下载图片到配置的图片子目录
+    img_map = _download_images(
+        img_urls,
+        article_dir,
+        config["image_dir_name"],
+        session,
+        config["timeout"],
+    )
 
     # 6. 替换图片标记为本地路径
     if img_map:
         md_content = _replace_image_markers(md_content, img_map, article_dir)
 
     # 7. 构建完整文件并写入
-    frontmatter = build_frontmatter(meta)
+    frontmatter = build_frontmatter(meta, config)
     full_content = frontmatter + md_content
     save_markdown(filepath, full_content)
 
