@@ -627,7 +627,7 @@ def warn_theme_fonts(css_path: Path) -> None:
         return
 
     required = [
-        SKILL_DIR / "fonts" / "仓耳今楷02-W02.ttf",
+        SKILL_DIR / "fonts" / "仓耳今楷02-W04.ttf",
         SKILL_DIR / "fonts" / "仓耳今楷02-W05.ttf",
     ]
     missing = [path.name for path in required if not path.exists()]

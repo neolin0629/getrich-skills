@@ -585,8 +585,6 @@
     color: #888;
 }
 
-/* TOC / footnotes / slider 
-
 /* TOC / footnotes / slider dark theme overrides */
 :root {
   --toc-bg: #161B22;
