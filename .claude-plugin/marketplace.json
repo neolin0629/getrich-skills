@@ -1,0 +1,29 @@
+{
+  "name": "getrich-skills",
+  "owner": {
+    "name": "Neo",
+    "email": "storychat@gmail.com"
+  },
+  "metadata": {
+    "description": "GetRich skills for quantitative research, AI coding, data infrastructure, and content creation workflows.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "getrich-skills",
+      "description": "All GetRich skills for quant research and AI-assisted development.",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/gr-chinese-typography-rules",
+        "./skills/gr-content-ai-avoid",
+        "./skills/gr-html-to-pdf",
+        "./skills/gr-markdown-themes",
+        "./skills/gr-ob-fix-color-tags",
+        "./skills/gr-wechat-article-capture",
+        "./skills/gr-weekly-review",
+        "./skills/gr-zhihu-scraper"
+      ]
+    }
+  ]
+}
