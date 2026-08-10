@@ -1,9 +1,7 @@
 ---
 name: gr-ob-fix-color-tags
 description: |
-  批量转义 Obsidian 中颜色代码前的 # 号，避免被识别为标签。
-  扫描所有 prompts/ 目录下的 .md 文件，将 #FFFFFF 格式转为 \#FFFFFF。
-  跨平台支持：Windows PowerShell / Linux / macOS zsh/bash
+  批量转义 Obsidian 中颜色代码前的 # 号，避免被识别为标签。扫描所有 prompts/ 目录下的 .md 文件，将 #FFFFFF 格式转为 \#FFFFFF。跨平台支持：Windows PowerShell / Linux / macOS zsh/bash
   触发方式：/gr-ob-fix-color-tags、/gr-fix-color-tags、/转义颜色代码、「fix color tags」
 ---
 
