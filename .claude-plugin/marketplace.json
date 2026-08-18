@@ -20,6 +20,7 @@
         "./skills/gr-html-to-pdf",
         "./skills/gr-markdown-themes",
         "./skills/gr-ob-fix-color-tags",
+        "./skills/gr-ob-rm-prompts-formatter",
         "./skills/gr-wechat-article-capture",
         "./skills/gr-weekly-review",
         "./skills/gr-zhihu-scraper"

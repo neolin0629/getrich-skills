@@ -1,11 +1,8 @@
 ---
 name: gr-content-ai-avoid
 description: |
-  中文自媒体写作的「反 AI 味」执行规范。写作时主动规避 39 条 AI 写作指纹（词汇、句法、结构、内容、真实感、格式六层），并在交付前用 scripts/check.py 做一次机械自检。
-  适用体裁：公众号长文、小红书短笔记与长图文、微博、知乎、短视频口播稿、朋友圈、商业文案、人设日常内容；金融 / 量化 / 宏观等专业内容同样适用。
-  能力边界：本 skill 管「怎么写才不像 AI」，不输出 AI 味打分报告。写作前加载，写作中贯穿执行，写完跑脚本。中文产出同时加载 gr-chinese-typography-rules。
-  Trigger: 写文章、写笔记、写公众号、写小红书、写知乎、写文案、写口播稿、写草稿、生成内容、帮我写、创作、起一段、写一篇、列提纲、改文案、润色、去 AI 味、避免 AI 味、别写得像 AI、按这个规范写、/gr-content-ai-avoid。
-  English trigger: write Chinese article, draft Chinese content, avoid sounding like AI, humanize Chinese copy, write a post, write copy.
+  中文写作反 AI 味规范：按 39 条 AI 写作指纹（词汇、句法、结构、内容、真实感、格式六层）执行，交付前跑 scripts/check.py 自检。写或改中文文章、笔记、公众号、小红书、知乎、口播稿、文案时使用，用户说「去 AI 味」「别写得像 AI」时也用。只管怎么写，不出 AI 味打分报告。
+  English trigger: write or humanize Chinese content, avoid sounding like AI.
 ---
 
 # gr-content-ai-avoid：中文写作反 AI 指纹规范

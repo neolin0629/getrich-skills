@@ -1,6 +1,6 @@
 # getrich-skills
 
-一套面向量化复盘、内容创作、网页剪藏和文档处理的 AI Skill 集合，目前包含 8 个 Skill。
+一套面向量化复盘、内容创作、网页剪藏和文档处理的 AI Skill 集合，目前包含 9 个 Skill。
 
 ## 安装
 
@@ -23,7 +23,8 @@ npx skills add neolin0629/getrich-skills -a claude-code -a codex -g -y
 | `gr-html-to-pdf` | 使用 Chrome、Chromium 或 Edge 将本地 / 在线 HTML 导出为 PDF |
 | `gr-chinese-typography-rules` | 统一中文排版，覆盖中英文空格、标点、数字、日期和金融表达 |
 | `gr-content-ai-avoid` | 按 6 个层级、39 条规则规避中文写作中的 AI 指纹，并提供脚本自检 |
-| `gr-ob-fix-color-tags` | 转义 Obsidian `prompts/` 目录中的十六进制颜色代码，避免被识别为标签 |
+| `gr-ob-fix-color-tags` | 用全角括号包裹 Obsidian `prompts/` 目录中的十六进制颜色代码，避免被识别为标签 |
+| `gr-ob-rm-prompts-formatter` | 批量删除 Obsidian `prompts/` 目录中 Markdown 文件开头的 YAML frontmatter |
 
 安装后，可以直接描述任务，也可以显式指定 Skill 名称。例如：
 
@@ -62,6 +63,7 @@ skills/
 ├── gr-html-to-pdf/
 ├── gr-markdown-themes/
 ├── gr-ob-fix-color-tags/
+├── gr-ob-rm-prompts-formatter/
 ├── gr-wechat-article-capture/
 ├── gr-weekly-review/
 └── gr-zhihu-scraper/

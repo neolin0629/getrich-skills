@@ -1,9 +1,8 @@
 ---
 name: gr-chinese-typography-rules
 description: |
-  中文文案排版规则。在写任何中文内容（文章、笔记、公众号、小红书、回复、评论、研报、短视频文案）时自动遵循：中英文加空格、全角标点、直角引号、顿号并列、省略号破折号、专有名词大小写、千位分隔符、日期时间格式、数学金融表达式格式、增减倍数表述、的地得区分、人称代词。与 content-ai-avoid skill 联动：任何规避 AI 味的中文内容都应同时遵循本排版规则。
-  Trigger: 写中文、写文章、写笔记、排版、中文文案、公众号、小红书、微博、短视频文案、研报、分析文章、润色、/排版规则、按排版规范写、gr-chinese-typography-rules。
-  English trigger: Chinese typography, Chinese copywriting format, write Chinese content.
+  中文排版规则：中英文空格、全角标点、直角引号、数字与单位、日期时间、千位分隔符、专有名词大小写、金融数学表达式、的地得。写或润色任何中文内容（文章、笔记、公众号、小红书、微博、研报、口播稿）时遵循，与 gr-content-ai-avoid 配合使用。
+  English trigger: Chinese typography and copywriting format.
 ---
 
 # 中文排版规则
