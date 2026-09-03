@@ -1,6 +1,6 @@
 # getrich-skills
 
-一套面向量化复盘、内容创作、网页剪藏和文档处理的 AI Skill 集合，目前包含 9 个 Skill。
+一套面向联网搜索、内容创作和 Obsidian 文档处理的 AI Skill 集合，目前包含 5 个 Skill。
 
 ## 安装
 
@@ -10,18 +10,21 @@
 npx skills add neolin0629/getrich-skills -a claude-code -a codex -g -y
 ```
 
+也可以通过 `@` 或 `--skill` 只安装一个 Skill：
+
+```bash
+npx skills use neolin0629/getrich-skills@gr-search | claude
+npx skills use neolin0629/getrich-skills --skill gr-search --agent claude-code
+```
+
 安装完成后，重启对应的 AI 客户端。
 
 ## Skill 一览
 
 | Skill | 功能 |
 | --- | --- |
-| `gr-weekly-review` | 采集 A 股、期权、全球市场、商品和流动性数据，生成周复盘报告 |
-| `gr-wechat-article-capture` | 将微信公众号文章转换为 Markdown，并下载正文图片、补充 frontmatter |
-| `gr-zhihu-scraper` | 将知乎回答、知乎专栏或通用网页剪藏为 Markdown |
-| `gr-markdown-themes` | 根据内容选择主题，将 Markdown 渲染为带样式的 HTML |
-| `gr-html-to-pdf` | 使用 Chrome、Chromium 或 Edge 将本地 / 在线 HTML 导出为 PDF |
-| `gr-chinese-typography-rules` | 统一中文排版，覆盖中英文空格、标点、数字、日期和金融表达 |
+| `gr-search` | 同时调用豆包搜索和 Parallel，去重融合后按 token 预算压缩输出，支持图片搜索与正文抓取 |
+| `gr-chinese-typography-rules` | 检查或统一中文排版，覆盖中英文空格、标点、引号、数字、日期和金融表达，附机械自检脚本 |
 | `gr-content-ai-avoid` | 按 6 个层级、39 条规则规避中文写作中的 AI 指纹，并提供脚本自检 |
 | `gr-ob-fix-color-tags` | 用全角括号包裹 Obsidian `prompts/` 目录中的十六进制颜色代码，避免被识别为标签 |
 | `gr-ob-rm-prompts-formatter` | 批量删除 Obsidian `prompts/` 目录中 Markdown 文件开头的 YAML frontmatter |
@@ -29,30 +32,32 @@ npx skills add neolin0629/getrich-skills -a claude-code -a codex -g -y
 安装后，可以直接描述任务，也可以显式指定 Skill 名称。例如：
 
 ```text
-使用 gr-weekly-review 复盘本周
-使用 gr-markdown-themes 把 article.md 转成 HTML
-使用 gr-chinese-typography-rules 润色这段中文
+使用 gr-search 搜索豆包搜索的计费方式
+使用 gr-chinese-typography-rules 检查这篇稿子的排版
 ```
 
 `gr-chinese-typography-rules` 负责排版，`gr-content-ai-avoid` 负责表达；创作中文内容时可配合使用。
 
 ## 可选依赖
 
-部分 Skill 包含 Python 脚本，按需安装依赖：
+`gr-search` 不需要 pip 依赖（纯标准库），但需要：
 
 ```bash
-# 微信文章抓取
-python3 -m pip install requests beautifulsoup4 html2text
-
-# 知乎 / 网页剪藏
-python3 -m pip install requests beautifulsoup4 html2text playwright
-python3 -m playwright install chromium
-
-# 量化周复盘
-python3 -m pip install akshare yfinance pandas numpy matplotlib pyecharts requests beautifulsoup4
+# Parallel CLI（用于补充信源和抓取网页正文）
+uv tool install "parallel-web-tools[cli]"
 ```
 
-导出 PDF 还需要本机安装 Chrome、Chromium 或 Edge。知乎内容可能需要已登录账号的 Cookie；各 Skill 的具体用法和限制以对应目录内的 `SKILL.md` 为准。
+以及一个[豆包搜索](https://console.volcengine.com/search-infinity/web-search) API Key。首次使用时**由你本人在终端**执行下面的命令写入（不回显、不进命令行历史）：
+
+```bash
+python3 skills/gr-search/scripts/gr_search.py config set-key doubao
+```
+
+[Parallel](https://platform.parallel.ai/home) 侧可以跑 `/parallel-cli-setup` 走 OAuth 登录；换机器时也可以用
+`config set-key parallel` 配置 API Key，避免每台机器重新登录。
+配置完成后用 `config doctor` 检查两个源是否都可用。
+
+各 Skill 的具体用法和限制以对应目录内的 `SKILL.md` 为准。
 
 ## 目录结构
 
@@ -60,13 +65,9 @@ python3 -m pip install akshare yfinance pandas numpy matplotlib pyecharts reques
 skills/
 ├── gr-chinese-typography-rules/
 ├── gr-content-ai-avoid/
-├── gr-html-to-pdf/
-├── gr-markdown-themes/
 ├── gr-ob-fix-color-tags/
 ├── gr-ob-rm-prompts-formatter/
-├── gr-wechat-article-capture/
-├── gr-weekly-review/
-└── gr-zhihu-scraper/
+└── gr-search/
 ```
 
 ## License
