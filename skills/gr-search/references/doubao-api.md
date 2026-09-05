@@ -25,10 +25,6 @@ Global 版的字段表仍保留在本文档中作参考，但 `sources.py` **不
 差的是下划线而不是大小写。
 
 结果是：传错的字段被**静默丢弃，不报错**，服务端按默认值处理。
-huashu-doubao-search 这个 MCP 就栽在这里，实测传 `count=20` 只回 10 条、
-传 `snippet_length=2000` 仍被按默认 500 token 截断、传 `images=0` 照样返图，
-而作者把这个 bug 误判成了服务端行为写进文档。
-
 `gr_search.py search --dry-run` 就是为核对这件事准备的：打印请求体但不发请求。
 
 ## 通用

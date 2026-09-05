@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
+
 from fusion import Merged
 from sources import AUTHORITY_LABEL
 
@@ -26,11 +28,72 @@ CARD_BUDGET = 2500
 _DECAY = 0.72
 _MIN_BODY = 200
 _MAX_BODY = 2000
+# 元信息（标题/URL/亦见）最多吃掉这么多预算，剩下的必须留给正文。
+# 没有这条线时，结果一多就会出现"全是标题、一条摘要都没有"的退化输出。
+_META_SHARE = 0.5
 # 「来源:」汇总行不占用 render_results 的正文预算，单独限额，
 # 否则长标题/长 URL 在条目多时能把这一行撑到几万字符，budget 形同虚设。
 _SOURCES_LINE_CAP = 2000
 
+# 单字段硬上限：标题/URL/站点名都是上游可控的，没有上限时一条结果就能击穿整个预算
+# （首条无条件输出，挡不住）。完整值始终保留在落盘 JSON 里，这里只是显示截断。
+MAX_TITLE = 200
+MAX_URL = 300
+MAX_SITE = 80
+_MAX_PUBLISH = 10   # 只显示日期部分
+_MAX_LABEL = 40     # 未收录的 CardType、如意类型名等短标签
+_MAX_NUM = 12       # 图片宽高之类的数值字段
+_MIN_IMAGE_URL = 60  # 图片 URL 再怎么压也要留出可辨认的长度
+# 元信息行整行的额度上限与地板。上限是各字段固定上限之和的量级，
+# 地板保证极小预算下这一行仍然认得出是哪条结果。
+_META_LINE_CAP = MAX_TITLE + MAX_SITE + _MAX_LABEL + _MAX_PUBLISH + 20
+_MIN_META_LINE = 48
+_MIN_META_URL = 48
+_MAX_QUERY_ECHO = 200  # 抬头行里回显的查询词
+_MIN_BODY_TAIL = 40  # 正文最后一行至少要能留这么多字符，否则不如不放
+# 错误详情里嵌着上游返回的响应片段。豆包的 ResponseMetadata.Error.Message
+# 没有长度上限，不限长的话一条错误就能击穿整个输出预算。
+_MAX_ERROR = 300
+_MIN_ERROR = 24    # 短到只够 "doubao 失败: ..." 这一句——保住事实，详情去落盘 JSON 取
+_ERROR_NOTE_RESERVE = 40  # 给"另有 N 条从略"预留的位置
+_ERRORS_CAP = 900
+
 _SENTENCE_END = re.compile(r"[。！？!?\n]")
+
+# 被预算裁掉的内容去哪找，取决于这次**到底有没有落盘**。
+# --no-dump 或落盘失败时仍说"见落盘 JSON"就是在骗人：那些卡片、结果和错误详情
+# 事实上已经无法恢复。这种谎话比省略本身更糟——它让人以为还有得救。
+_DUMPED_HINT = "见落盘 JSON"
+_NOT_DUMPED_HINT = "本次未落盘，已无法恢复"
+
+
+def _recovery_hint(dumped: bool) -> str:
+    return _DUMPED_HINT if dumped else _NOT_DUMPED_HINT
+
+# 边界标记用的三连尖括号：不可信文本里出现就换成单尖括号的同形字符。
+# 页面正文若原样包含 `<<< 搜索结果结束 >>>`，输出里就会出现第二个结束标记，
+# 其后的注入文本看起来已经在围栏之外——整套"结果是数据不是指令"的隔离就此失效。
+# 全角形式一并中和：它不构成精确 sentinel，但足以造成视觉混淆。
+_FENCE_CHARS = (("<<<", "‹‹‹"), (">>>", "›››"), ("＜＜＜", "‹‹‹"), ("＞＞＞", "›››"))
+
+
+def defang(text: str) -> str:
+    """中和不可信文本里的边界标记。所有上游可控内容进入输出前都要过这一道。"""
+    if not text:
+        return ""
+    for raw, safe in _FENCE_CHARS:
+        text = text.replace(raw, safe)
+    return text
+
+
+def field(text: object, limit: int) -> str:
+    """上游字段的**唯一**入口：先中和边界标记，再截到硬上限。
+
+    渲染器里凡是来自上游响应的值——标题、URL、站点、发布时间、如意类型、
+    图片宽高——都必须走这里。漏掉任何一个，那个字段就是围栏的缺口。
+    """
+    cleaned = defang(str(text if text is not None else "")).strip()
+    return cleaned if len(cleaned) <= limit else cleaned[:limit] + "…"
 
 # 卡片类型 → 中文标题。未收录的类型直接显示原始 CardType，不猜。
 CARD_LABELS = {
@@ -59,7 +122,7 @@ def truncate(text: str, limit: int) -> str:
     return window[:cut].rstrip() + "…"
 
 
-def render_cards(cards: list[dict], budget: int = CARD_BUDGET) -> str:
+def render_cards(cards: list[dict], budget: int = CARD_BUDGET, dumped: bool = True) -> str:
     """标注命中了哪些火山如意卡片，但不展开卡片 JSON。
 
     实测（2026-09-03，query「北京今日最高气温」）：把 WeatherCard 递归展平会产出
@@ -71,21 +134,42 @@ def render_cards(cards: list[dict], budget: int = CARD_BUDGET) -> str:
     官方文档写明 CardResults 是 WebResults 中如意结果的子集，
     所以卡片对应的 WebItem 必定存在于结果列表里 —— 那份文本才是给模型读的，
     卡片 JSON 是给前端搭 UI 组件用的。完整卡片仍保留在落盘 JSON 的 cards 字段中。
+
+    budget 是这一段的硬上限。未收录的 CardType 原样显示，而类型名和条数都由上游
+    决定：不限量时 1000 个未知类型能产出四万多字符，把整个输出预算吃干净。
     """
     if not cards:
         return ""
-    labels = []
+    prefix = "命中火山如意结构化直答（"
+    suffix = ("），见下方标了「如意」的结果；结构化原始值"
+              + ("在落盘 JSON 的 cards 字段。" if dumped else "本次未落盘。"))
+    room = budget - len(prefix) - len(suffix)
+
+    labels: list[str] = []
+    seen: set[str] = set()   # 用 set 而不是扫 list：卡片数可以很大，O(n²) 会真的卡住
+    used = 0
+    omitted = 0
     for card in cards:
         card_type = card.get("CardType") or "未知"
-        label = CARD_LABELS.get(card_type, card_type)
-        if label not in labels:
-            labels.append(label)
+        # 按**原始** CardType 去重：两个只在第 41 个字符之后才不同的类型，
+        # 截断后的显示标签是一样的，按标签去重会把它们错误地合并成一类
+        if card_type in seen:
+            continue
+        seen.add(card_type)
+        label = CARD_LABELS.get(card_type, field(card_type, _MAX_LABEL))
+        cost = len(label) + (3 if labels else 0)  # " / " 分隔符
+        # 首个标签无条件保留：预算再小也不该把"命中了结构化直答"这个事实整个吞掉
+        if labels and used + cost > room:
+            omitted += 1  # 已在上面去过重，这里数的是**类型数**而不是出现次数
+            continue
+        labels.append(label)
+        used += cost
     if not labels:
         return ""
-    return (
-        f"命中火山如意结构化直答（{' / '.join(labels)}），"
-        "见下方标了「如意」的结果；结构化原始值在落盘 JSON 的 cards 字段。"
-    )
+    text = prefix + " / ".join(labels)
+    if omitted:
+        text += f" 等 {omitted} 类从略"
+    return text + suffix
 
 
 def _allocate(count: int, budget: int) -> list[int]:
@@ -120,54 +204,170 @@ def _allocate(count: int, budget: int) -> list[int]:
     return shares
 
 
-def _meta_line(index: int, item: Merged) -> str:
-    bits = [f"[{index}] {item.title or '(无标题)'}"]
+def _fit_body(body: str, share: int, indent: str = "    ") -> list[str]:
+    """把正文塞进 share 个字符（含每行缩进开销），返回已缩进的行。
+
+    关键：装不下的那一行要**再截短**，绝不整行丢弃。
+    Parallel 的 excerpt 和豆包的 Summary 经常是一整段不带换行的长文本，
+    整行丢弃等于把一条结果里最有价值的内容删光（正文直接消失，只剩标题和 URL）。
+    """
+    lines = [ln for ln in defang(body).splitlines() if ln.strip()]
+    out: list[str] = []
+    used = 0
+    for line in lines:
+        cost = len(indent) + len(line) + 1
+        if used + cost <= share:
+            out.append(indent + line)
+            used += cost
+            continue
+        room = share - used - len(indent) - 1
+        if room >= _MIN_BODY_TAIL:
+            out.append(indent + truncate(line, room))
+        break
+    return out
+
+
+def _meta_line(index: int, item: Merged, budget: int = _META_LINE_CAP) -> str:
+    """元信息行。除 AUTHORITY_LABEL（本地常量表）外每一项都来自上游，一律走 field()。
+
+    **整行共用一份额度**，而不是每个字段各自取固定上限。标题 200 + 站点 80 +
+    如意 40 + 日期 10 各自都"没超自己的上限"，加起来却能让首条撑到 1164 字符——
+    而首条是无条件输出的，谁也挡不住。这和图片行踩的是同一个坑。
+    """
+    avail = max(budget, _MIN_META_LINE)
+    title_cap = max(min(MAX_TITLE, int(avail * 0.60)), 24)
+    site_cap = max(min(MAX_SITE, int(avail * 0.20)), 12)
+    label_cap = max(min(_MAX_LABEL, int(avail * 0.12)), 8)
+
+    bits = [f"[{index}] {field(item.title, title_cap) or '(无标题)'}"]
     if item.site:
-        bits.append(item.site)
+        bits.append(field(item.site, site_cap))
     if item.publish:
-        bits.append(item.publish[:10])
+        bits.append(field(item.publish, _MAX_PUBLISH))
     if item.authority in AUTHORITY_LABEL:
         bits.append(AUTHORITY_LABEL[item.authority])
     if len(item.sources) >= 2:
         bits.append("双源")
     if item.ruyi:
-        bits.append(f"如意·{item.ruyi}")
+        # RuyiInfo.Type 是上游原样返回的字符串，不是我们的枚举
+        bits.append(f"如意·{field(item.ruyi, label_cap)}")
     return " · ".join(bits)
 
 
-def render_results(items: list[Merged], budget: int) -> tuple[str, int]:
-    """渲染网页结果，返回 (文本, 带正文的条数)。预算耗尽的结果降级成单行。"""
+def render_results(items: list[Merged], budget: int, dumped: bool = True) -> tuple[str, int]:
+    """渲染网页结果，返回 (文本, 带正文的条数)。
+
+    预算是硬上限，按「剩余字符」逐条渲染：
+    - 正文预算按几何衰减分配，分不到 _MIN_BODY 的结果降级成单行（只留元信息 + URL）；
+    - 剩余预算装不下下一条时就停，尾部明确注明省略了几条，**绝不静默丢结果**；
+    - 第一条无条件输出：宁可略微超预算，也不能返回空字符串让调用方以为没搜到。
+    """
     if not items:
         return "", 0
 
-    metas = [_meta_line(i, item) for i, item in enumerate(items, start=1)]
+    # 每行三部分（元信息 / URL / 亦见）的额度都随总预算收缩。上限固定时，
+    # 无条件输出的首条能独自撑到 1164 字符——远超"围栏造成的固定下限"那个说法。
+    meta_room = max(min(_META_LINE_CAP, int(budget * 0.35)), _MIN_META_LINE)
+    url_room = max(min(MAX_URL, int(budget * 0.30)), _MIN_META_URL)
+    also_room = max(min(MAX_URL, int(budget * 0.15)) // 3, 0)
+
+    metas = [_meta_line(i, item, meta_room) for i, item in enumerate(items, start=1)]
+    urls = [field(item.url, url_room) for item in items]
+    also = [" ".join(field(u, also_room) for u in item.also_urls[:3]) if also_room else ""
+            for item in items]
     # 每条的元信息/URL/亦见行开销按真实长度算，而不是猜一个固定值——
     # 标题、URL 长度差异很大，固定开销偏低时正文预算会算多，最终输出撑爆 budget。
     overheads = []
-    for item, meta in zip(items, metas):
+    for meta, url, also_line in zip(metas, urls, also):
         cost = len(meta) + 1
-        if item.url:
-            cost += len(item.url) + 5
-        if item.also_urls:
-            cost += len(" ".join(item.also_urls[:3])) + 10
+        if url:
+            cost += len(url) + 5
+        if also_line:
+            cost += len(also_line) + 10
         overheads.append(cost)
-    body_budget = max(budget - sum(overheads), 0)
-    shares = _allocate(len(items), body_budget)
+
+    # 省略提示本身也要占位置，否则「刚好装满」时加上提示就又超预算了
+    notice_reserve = 40
+
+    # 先定出**能展示哪几条**，再只给这个前缀分配正文预算。
+    # 若按全部候选项的元信息开销扣预算，50 条结果 / budget 8000 会出现最坏情况：
+    # 元信息把预算扣成 0，正文一条都分不到，最终展示了 31 条光秃秃的标题+链接。
+    # 带摘要的 10 条远比无摘要的 31 条有用，所以元信息最多只许吃掉 _META_SHARE。
+    meta_cap = int(budget * _META_SHARE)
+    shown = 0
+    meta_used = 0
+    for cost in overheads:
+        if shown and (meta_used + cost > meta_cap
+                      or meta_used + cost + notice_reserve > budget):
+            break
+        meta_used += cost
+        shown += 1
+
+    body_budget = max(budget - meta_used - (notice_reserve if shown < len(items) else 0), 0)
+    # _allocate 在预算为 0 时返回空列表；补齐成全 0，否则 zip 会把所有结果一起吃掉
+    shares = _allocate(shown, body_budget)
+    shares += [0] * (shown - len(shares))
 
     blocks: list[str] = []
     detailed = 0
-    for item, meta, share in zip(items, metas, shares):
+    remaining = budget
+    for position in range(shown):
+        item, meta, share = items[position], metas[position], shares[position]
+        url, also_line = urls[position], also[position]
         lines = [meta]
-        if item.url:
-            lines.append(f"    {item.url}")
+        if url:
+            lines.append(f"    {url}")
         if share >= _MIN_BODY and item.body:
-            body = truncate(item.body, share)
-            lines += [f"    {line}" for line in body.splitlines() if line.strip()]
-            detailed += 1
-        if item.also_urls:
-            lines.append(f"    亦见: {' '.join(item.also_urls[:3])}")
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks), detailed
+            body_lines = _fit_body(item.body, share)
+            if body_lines:
+                lines += body_lines
+                detailed += 1
+        if also_line:
+            lines.append(f"    亦见: {also_line}")
+        block = "\n".join(lines)
+        if blocks and len(block) + 2 > remaining - notice_reserve:
+            break
+        blocks.append(block)
+        remaining -= len(block) + 2
+
+    text = "\n\n".join(blocks)
+    omitted = len(items) - len(blocks)
+    if omitted > 0:
+        text += (f"\n\n…另有 {omitted} 条结果超出输出预算未展开，"
+                 f"完整内容{_recovery_hint(dumped)}")
+    return text, detailed
+
+
+def _fit_errors(errors: list[str], budget: int, dumped: bool = True) -> list[str]:
+    """错误行：中和边界标记，**详情长度随实时剩余额度收缩**。
+
+    要保住的是"某个源失败了"这个事实——丢了它，输出看起来一切正常，
+    而结果其实少了一半。详情不必保住：完整错误始终在落盘 JSON 里。
+
+    所以首条不是"无条件放满 300 字符"，而是"无条件保留、但详情压到额度允许的长度"。
+    错误、结果、卡片三处各自"首条无条件"，叠在一起就能把小预算整个撑破。
+    """
+    lines: list[str] = []
+    used = 0
+    for index, message in enumerate(errors):
+        # 后面还有错误时先给省略提示留位置，否则详情会把额度吃干净、
+        # 提示反而放不下，用户就不知道究竟省了几条。
+        reserve = _ERROR_NOTE_RESERVE if index + 1 < len(errors) else 0
+        room = max(min(_MAX_ERROR, budget - used - 2 - reserve), 0)
+        if room < _MIN_ERROR:
+            if lines:
+                # 提示本身也要放得下才放：首条已经传达了"有源失败"这个事实，
+                # 无条件追加会让硬下限再抬高一截。
+                note = (f"⚠ 另有 {len(errors) - index} 条错误详情从略，"
+                        f"{_recovery_hint(dumped)}")
+                if used + len(note) + 2 <= budget:
+                    lines.append(note)
+                break
+            room = _MIN_ERROR  # 首条：事实保住，详情压到最短
+        line = f"⚠ {field(message, room)}"
+        lines.append(line)
+        used += len(line) + 2
+    return lines
 
 
 def render_sources_line(items: list[Merged], limit_chars: int) -> str:
@@ -177,41 +377,70 @@ def render_sources_line(items: list[Merged], limit_chars: int) -> str:
     entries: list[str] = []
     total = 0
     omitted = 0
+    # 每条的字段上限也要随本行额度收缩。固定 MAX_SITE/MAX_URL 时首条无条件保留，
+    # 极端字段下这一行自己就能超出额度 80 多字符——和元信息行、图片行同一个坑。
+    entry_cap = max(min(MAX_SITE, limit_chars // 3), 16)
+    url_cap = max(min(MAX_URL, limit_chars // 2), 24)
     for i, item in enumerate(items, 1):
         if not item.url:
             continue
-        entry = f"[{i}] {item.site or item.url}"
+        entry = f"[{i}] {field(item.site, entry_cap) or field(item.url, url_cap)}"
         cost = len(entry) + 2
-        if entries and total + cost > limit_chars:
+        # 首条同样受约束：这一行只是汇总，每条结果自己都带着 URL，
+        # 放不下就整行不给，不必为了"至少有一条"而超额
+        if total + cost > limit_chars:
             omitted += 1
             continue
         entries.append(entry)
         total += cost
     line = "  ".join(entries)
-    if omitted:
+    if omitted and total + len(f"  …另有 {omitted} 条从略") <= limit_chars:
         line += f"  …另有 {omitted} 条从略"
     return line
 
 
-def render_images(items: list[Merged], limit: int = 20) -> str:
-    """图片搜索的紧凑表格。"""
-    rows = []
+def render_images(items: list[Merged], budget: int, limit: int = 20) -> str:
+    """图片搜索的紧凑表格。同样受硬预算约束：图片 URL 常常很长，条数一多就能撑爆输出。
+
+    首行无条件输出（否则图搜会返回空），但它的各个字段上限**随预算收缩**——
+    固定的 300 字符 URL + 40 字符描述在 budget=300 时就能让首行独自撑到 560。
+    和 fetch 路径同一个道理：字段上限不跟着预算走，"首条无条件"就成了无底洞。
+    """
+    rows: list[str] = []
+    remaining = budget
     for item in items:
         for image in item.images:
             if not image.get("url"):
                 continue
-            size = f"{image.get('width', '?')}×{image.get('height', '?')}"
+            # 宽高也是上游原样透传的 JSON 值，可能是任意字符串而不是数字
+            width = field(image.get("width"), _MAX_NUM) or "?"
+            height = field(image.get("height"), _MAX_NUM) or "?"
+            # **整行共用一份预算**，而不是每个字段各自取上限：各自取的话
+            # 每个字段都"没超自己的上限"，加起来照样把 remaining 撑破。
+            prefix = f"[{len(rows) + 1}] {width}×{height} · "
+            avail = max(remaining - len(prefix) - len(" · ") - 5, 0)  # 5 = 换行 + URL 行缩进
+            note_cap = max(min(20, int(avail * 0.20) // 3), 6)
+            desc_cap = max(min(40, int(avail * 0.25)), 12)
+            url_cap = max(min(MAX_URL, int(avail * 0.55)), _MIN_IMAGE_URL)
             note = " · ".join(
-                str(x) for x in (image.get("shape"), image.get("blur"), image.get("watermark")) if x
+                field(x, note_cap)
+                for x in (image.get("shape"), image.get("blur"), image.get("watermark")) if x
             )
-            desc = (image.get("alt") or item.title or "")[:40]
-            rows.append(f"[{len(rows) + 1}] {size} · {note or '—'} · {desc}\n    {image['url']}")
-            if len(rows) >= limit:
+            desc = field(image.get("alt") or item.title, desc_cap)
+            url = field(image["url"], url_cap)
+            row = f"{prefix}{note or '—'} · {desc}\n    {url}"
+            # 首行无条件输出，所以只能靠再砍 URL 收尾——地板之上绝不允许超额
+            if not rows and len(row) + 1 > remaining:
+                room = remaining - (len(row) - len(url)) - 1
+                row = f"{prefix}{note or '—'} · {desc}\n    {url[:max(room, 0)]}"
+            if rows and (len(row) + 1 > remaining or len(rows) >= limit):
                 return "\n".join(rows)
+            rows.append(row)
+            remaining -= len(row) + 1
     return "\n".join(rows)
 
 
-def render(
+def _assemble(
     query: str,
     items: list[Merged],
     cards: list[dict],
@@ -222,34 +451,143 @@ def render(
     elapsed: float,
     dump_path: str | None,
     image_mode: bool = False,
-) -> str:
-    """组装最终输出。stdout 是压缩版，全量结果落盘供追问。"""
-    head = f'gr-search: "{query}" | {" + ".join(stats) if stats else "无可用结果"}'
+) -> tuple[list[str], int, int | None]:
+    """组装输出，返回 (分段列表, 超出预算的字符数, 正文分段的下标)。
+
+    返回分段列表而不是拼好的字符串：正文本身含换行，拼完再 split 得到的下标
+    和 parts 的下标对不上，兜底截断会砍错地方。
+
+    超额量单独返回而不是就地修掉，是为了让测试能断言"各分段自己就没算错"——
+    出口的兜底截断能让总长永远合规，从而掩盖分段里的缺陷。
+
+    围栏规则：**所有上游派生文本都在同一道围栏之内**，一处不漏。
+    defang() 只能阻止伪造 sentinel，阻止不了"忽略之前的指示"这种普通注入句子——
+    那种文本一旦出现在围栏之外，读者就没有任何依据判断它是数据还是指令。
+    所以卡片提示、来源清单、错误详情（含上游 HTTP 响应片段）全部进围栏；
+    围栏外只留我们自己生成的内容：抬头行、落盘路径、无结果提示。
+    """
+    # query 来自用户而非公网，但它同样不该让输出突破总预算——
+    # 一个 10000 字符的查询会让 budget=8000 输出 10088 字符，总预算就不是硬上限了。
+    # 抬头行和落盘路径都是无条件输出的，所以它们也必须分预算——
+    # 出口的兜底截断只压正文，压不到这两行。1000 字符的 dump_dir 配上 budget=425
+    # 曾输出 1402 字符，"总预算是硬上限"就此不成立。
+    query_room = max(min(_MAX_QUERY_ECHO, budget // 8), 24)
+    head = f'gr-search: "{field(query, query_room)}" | {" + ".join(stats) if stats else "无可用结果"}'
     head += f" → 去重后 {len(items)} | {elapsed:.1f}s | {profile}/{budget}"
     parts = [head]
     if dump_path:
-        parts.append(f"全量结果: {dump_path}")
+        # 截断过的路径没法用，所以只在放得下时给完整路径；放不下就退到文件名
+        # （目录在 output.dump_dir 配置里，agent 仍然找得到），再放不下就只说落了盘。
+        # 三级都要各自校验额度——只退一级的话，长文件名照样能把预算撑破。
+        room = max(budget // 3, 0)
+        basename = Path(dump_path).name
+        if len(dump_path) + 8 <= room:
+            parts.append(f"全量结果: {dump_path}")
+        elif len(basename) + 24 <= room:
+            parts.append(f"全量结果: {basename}（目录见 output.dump_dir 配置）")
+        else:
+            parts.append("全量结果: 已落盘（路径超出输出预算，见 output.dump_dir 配置）")
 
-    card_text = render_cards(cards)
-    remaining = budget - len(head) - (len(dump_path) + 8 if dump_path else 0) - len(card_text)
+    # 结构性开销（边界标记、空行、错误行）也要计入同一份预算，否则小预算下必然超支。
+    # 边界标记本身永远不参与截断：它是不可信内容的显式围栏，缺一半比超预算严重得多。
+    structural = len(BOUNDARY_OPEN) + len(BOUNDARY_CLOSE) + 8
+    remaining = budget - sum(len(p) + 1 for p in parts) - structural
+
+    dumped = bool(dump_path)
+    error_lines = _fit_errors(errors, min(_ERRORS_CAP, max(remaining // 4, 0)), dumped)
+    remaining -= sum(len(line) + 2 for line in error_lines)
+
+    # 卡片段自己也有硬上限，同时不许超过当前剩余预算的 1/4
+    card_text = render_cards(cards, min(CARD_BUDGET, max(remaining // 4, 0)), dumped)
     if card_text:
-        parts.append("")
-        parts.append(card_text)
+        remaining -= len(card_text) + 2
 
+    inner: list[str] = []
+    # 出口兜底要按优先级逐段削减，所以每一段的位置都得记下来。
+    # 削减顺序 = 价值从低到高：来源清单（每条结果自带 URL，它只是汇总）
+    # → 卡片提示（结果行上仍有「如意·」标记）→ 正文 → 错误详情（"失败"这个事实要留）。
+    slots: dict[str, int] = {}
+    body_slot: int | None = None
+    if card_text:
+        slots["card"] = len(inner)
+        inner += [card_text, ""]
+
+    # 预算已被抬头/卡片吃光时不再兜一个 600 的地板：那等于无视调用方给的预算。
+    # 「至少要有输出」由 render_results / render_images 保证首条无条件渲染来兜底。
     if image_mode:
-        table = render_images(items)
+        table = render_images(items, max(remaining, 0))
         if table:
-            parts += ["", BOUNDARY_OPEN, "", table, "", BOUNDARY_CLOSE]
+            body_slot = len(inner)
+            inner.append(table)
     elif items:
         sources_budget = min(max(remaining, 0) // 4, _SOURCES_LINE_CAP)
         sources_line = render_sources_line(items, sources_budget)
-        body, _ = render_results(items, max(remaining - len(sources_line), 600))
-        parts += ["", BOUNDARY_OPEN, "", body, "", BOUNDARY_CLOSE]
+        # 扣的是整个来源块的开销，不只是那行内容：前导空行 + "来源: " 前缀 + 换行。
+        # 只扣内容长度会让输出稳定超出 budget 几个字符。
+        sources_cost = len(sources_line) + len("来源: ") + 2 if sources_line else 0
+        body, _ = render_results(items, max(remaining - sources_cost, 0), dumped)
+        body_slot = len(inner)
+        inner.append(body)
         if sources_line:
-            parts += ["", f"来源: {sources_line}"]
+            slots["sources"] = len(inner) + 1
+            inner += ["", f"来源: {sources_line}"]
 
-    for message in errors:
-        parts.append(f"⚠ {message}")
+    if error_lines:
+        slots["errors"] = len(inner) + (1 if inner else 0)
+        inner += ([""] if inner else []) + error_lines
+
+    shed: list[tuple[int, int]] = []   # (parts 下标, 该段可以缩到的最短长度)
+    if inner:
+        base = len(parts) + 3   # ["", OPEN, ""] 之后才是 inner
+        if body_slot is not None:
+            slots["body"] = body_slot
+        parts += ["", BOUNDARY_OPEN, ""] + inner + ["", BOUNDARY_CLOSE]
+        # 顺序即优先级；地板 0 表示这一段可以整个删掉
+        for name, floor in (("sources", 0), ("card", 0),
+                            ("body", _MIN_BODY_TAIL), ("errors", _MIN_ERROR)):
+            if name in slots:
+                shed.append((base + slots[name], floor))
     if not items and not card_text:
         parts.append("本次没有拿到任何结果。可先运行 `config doctor` 检查两个源的可用性。")
+
+    return parts, len("\n".join(parts)) - budget, shed
+
+
+def render(*args, **kwargs) -> str:
+    """组装输出并兜住"总预算是硬上限"这个对外承诺。
+
+    分段核算难免有个位数偏差（分隔空行、比例取整、省略提示），与其指望每一处
+    都算得分毫不差，不如在出口把不变量兜住。
+
+    **只裁正文是不够的**：正文本来就短甚至为空时，那点超额没地方消化，
+    实测能超出 185 字符。所以按价值从低到高逐段削减——
+    来源清单 → 卡片提示 → 正文 → 错误详情，围栏和抬头永远不动。
+
+    **这道保险会掩盖各分段自身的预算缺陷**——分段算错了，出口照样把总长压回来，
+    端到端断言就看不出问题。所以各分段必须另有直接针对它自己的用例，
+    并且用 `_assemble` 断言"正常预算下根本不需要兜底"。
+    """
+    parts, overflow, shed = _assemble(*args, **kwargs)
+    if overflow <= 0:
+        return "\n".join(parts)
+    parts = list(parts)
+    for index, floor in shed:
+        if overflow <= 0:
+            break
+        current = parts[index]
+        room = len(current) - floor
+        if room <= 0:
+            continue
+        cut = min(room, overflow)
+        # cut 的算法已经保证 len(kept) >= floor，但 rstrip 会把它再压下去一截：
+        # 27 字符的错误行、floor=24，切到 24 之后 rstrip 掉一个尾随空格就是 23，
+        # 于是"少削 1 个字符"升级成"整条 ⚠ <源> 失败 消失"——输出看着一切正常，
+        # 结果其实少了一半。地板之上才采纳 rstrip，跌破就宁可留着那个尾随空格。
+        # floor=0 的段（来源清单/卡片提示）本来就允许整段删掉，不受这条约束。
+        kept = current[: len(current) - cut]
+        trimmed = kept.rstrip()
+        if floor and len(trimmed) < floor:
+            trimmed = kept
+        parts[index] = trimmed
+        overflow -= len(current) - len(parts[index])
     return "\n".join(parts)

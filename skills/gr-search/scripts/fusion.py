@@ -32,10 +32,58 @@ _TRACKING_EXACT = {
 }
 _HOST_PREFIXES = ("www.", "m.", "mobile.", "wap.", "amp.")
 _PUNCT = re.compile(r"[\s　-〿＀-￯!-/:-@\[-`{-~]+")
-_FRESH_WORDS = ("最新", "今天", "今日", "近期", "刚刚", "实时", "现在", "本周", "本月",
-                "latest", "today", "current", "recent", "now", "breaking")
 # 日级时效词：问"今天最高气温"时，去年的同题报道是干扰项而不是补充
-_FRESH_STRONG = ("今天", "今日", "现在", "实时", "刚刚", "当前", "today", "now", "breaking")
+_FRESH_STRONG = ("今天", "今日", "现在", "实时", "刚刚", "当前")
+# 强时效词必须是弱时效词的子集，否则会出现 is_strong_fresh_query 为真、
+# is_fresh_query 却为假的自相矛盾（「当前油价」一度就是这样）。
+_FRESH_WORDS = _FRESH_STRONG + ("最新", "近期", "本周", "本月")
+
+# 英文词必须按边界匹配，不能用子串：`now` 会命中 snowflake / knowledge / known，
+# 把「Snowflake database docs」误判成时效查询——既走 120 秒短缓存，又给旧文档降权。
+# 但不能用 `\b`：Python 的 \w 把中文也算词字符，「价格now走势」里 now 两侧
+# 都不成边界，反而漏判。改成只把 ASCII 字母数字下划线视为"词内"，中文相邻即成边界。
+# 下划线保留在排除集里是有意的：now_playing / current_events 是标识符，不是时效诉求。
+_EN_BOUND = (r"(?<![A-Za-z0-9_])(?:%s)(?![A-Za-z0-9_])")
+_FRESH_WORDS_EN = re.compile(_EN_BOUND % "latest|today|current|recent|now|breaking", re.IGNORECASE)
+_FRESH_STRONG_EN = re.compile(_EN_BOUND % "today|now|breaking", re.IGNORECASE)
+
+# 中文没有词间空格，但裸子串同样会误命中——这是英文侧 now/snowflake 的中文版本，
+# 一度只修了英文：「日本月刊」「成本月度分摊」命中本月，「出现在哪个版本」命中现在，
+# 「应当前往」命中当前。误判的代价是掉进 120 秒短缓存（重复调用重复付费）
+# 并按年份重排，对一个纯资料查询完全是负作用。
+#
+# 不引分词器：几十兆的依赖换这点收益不划算，而且误判的代价只是缓存档位和排序，
+# 不是正确性。改用"左邻字黑名单"——列出会与时效词首字组成**别的词**的那些字。
+# 这挡不住所有情况（"这本月刊"仍会漏），但把实际会碰到的那批全部挡掉了。
+_CN_LEFT_BLOCKERS = {
+    # X本：日本 / 成本 / 资本 / 版本 / 基本 / 根本 / 剧本 / 课本 / 文本 / 样本…
+    # 以及"这本 / 那本 / 一本"这类量词短语
+    "本周": "日成资版基根剧课文样副脚原标范台蓝读抄摹这那该某几一两三四五六七八九十半整",
+    "本月": "日成资版基根剧课文样副脚原标范台蓝读抄摹这那该某几一两三四五六七八九十半整",
+    "现在": "出表体展浮涌显呈实兑",   # 出现在 / 表现在 / 体现在 / 实现在…
+    "当前": "应理相适恰正妥停担充",   # 应当前 / 相当前 / 正当前…
+    "实时": "真确属事着落务写",       # 真实时 / 确实时 / 事实时…
+    "今日": "如当至",                 # 如今日 / 当今日
+    "今天": "如当至",
+    "近期": "附邻靠接临远最贴",       # 附近期 / 邻近期…
+    "最新": "",
+    "刚刚": "",
+}
+
+
+def _cn_fresh_hit(text: str, words) -> bool:
+    """中文时效词命中判定：命中位置的左邻字不能是"会组成别的词"的那些字。"""
+    for word in words:
+        blockers = _CN_LEFT_BLOCKERS.get(word, "")
+        start = 0
+        while True:
+            at = text.find(word, start)
+            if at < 0:
+                break
+            if at == 0 or text[at - 1] not in blockers:
+                return True
+            start = at + 1
+    return False
 
 
 def canonical_url(url: str) -> str:
@@ -208,16 +256,84 @@ def merge(docs: list[Doc], threshold: float = 0.75) -> list[Merged]:
     return merged
 
 
+# 显式的相对时间范围本身就是时效诉求，比任何关键词都明确。
+# 分档与中文时效词保持一致：OneDay 对应「今天」（日级，陈旧内容要压低），
+# OneWeek/OneMonth 对应「本周/本月」（周月级，只加权不降权），
+# OneYear 跨度太大，按普通查询处理，不必缩短缓存。
+_TIME_RANGE_STRONG = {"OneDay"}
+_TIME_RANGE_FRESH = {"OneDay", "OneWeek", "OneMonth"}
+
+
+_SPAN = re.compile(r"(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})")
+
+
+# 窄到这个跨度以内、且覆盖今天的区间，才算日级强时效
+_STRONG_SPAN_DAYS = 1
+
+
+def _parse_span(time_range: str | None):
+    """把显式日期区间解析成 (start, end)，不是区间就返回 None。"""
+    import datetime
+
+    match = _SPAN.fullmatch((time_range or "").strip())
+    if not match:
+        return None
+    try:
+        return (datetime.date.fromisoformat(match.group(1)),
+                datetime.date.fromisoformat(match.group(2)))
+    except ValueError:
+        return None
+
+
+def _span_reaches_now(time_range: str | None) -> bool:
+    """区间右端是否到达今天或更晚——即这次查询关心的是当前状态。
+
+    `2019-05-01..2019-05-01` 是历史查询，走 30 分钟缓存完全正确，
+    把所有单日区间都判成实时纯属浪费额度。
+    """
+    import datetime
+
+    span = _parse_span(time_range)
+    return bool(span) and span[1] >= datetime.date.today()
+
+
+def _span_is_day_level(time_range: str | None) -> bool:
+    """是否是**覆盖今天的窄日级区间**。
+
+    强时效不能和弱时效共用"右端≥今天"这一个条件：`2000-01-01..今天` 跨了 26 年，
+    它确实关心当前状态（弱时效成立），但把区间里那些几十年前的资料**强制降权**
+    是错的——strong 的语义是"陈旧内容是干扰项"，跨年区间里旧资料恰恰是正当结果。
+    """
+    import datetime
+
+    span = _parse_span(time_range)
+    if not span:
+        return False
+    start, end = span
+    today = datetime.date.today()
+    return start <= today <= end and (end - start).days <= _STRONG_SPAN_DAYS
+
+
+def time_range_is_fresh(time_range: str | None) -> bool:
+    """--time-range 是否构成（周月级）时效诉求。"""
+    return (time_range or "") in _TIME_RANGE_FRESH or _span_reaches_now(time_range)
+
+
+def time_range_is_strong_fresh(time_range: str | None) -> bool:
+    """--time-range 是否构成日级时效诉求。"""
+    return (time_range or "") in _TIME_RANGE_STRONG or _span_is_day_level(time_range)
+
+
 def is_fresh_query(query: str) -> bool:
-    """判断 query 是否带时效诉求，决定要不要按时间调权。"""
-    lowered = (query or "").lower()
-    return any(word in lowered for word in _FRESH_WORDS)
+    """判断 query 是否带时效诉求，决定要不要按时间调权、以及能接受多旧的缓存。"""
+    text = query or ""
+    return _cn_fresh_hit(text, _FRESH_WORDS) or bool(_FRESH_WORDS_EN.search(text))
 
 
 def is_strong_fresh_query(query: str) -> bool:
     """日级时效诉求，陈旧内容要被明确压低而不只是不加分。"""
-    lowered = (query or "").lower()
-    return any(word in lowered for word in _FRESH_STRONG)
+    text = query or ""
+    return _cn_fresh_hit(text, _FRESH_STRONG) or bool(_FRESH_STRONG_EN.search(text))
 
 
 def _recency_bonus(publish: str | None, strong: bool = False) -> float:

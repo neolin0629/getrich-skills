@@ -62,12 +62,31 @@ python3 skills/gr-search/scripts/gr_search.py config set-key doubao
 ## 目录结构
 
 ```text
-skills/
-├── gr-chinese-typography-rules/
-├── gr-content-ai-avoid/
-├── gr-ob-fix-color-tags/
-├── gr-ob-rm-prompts-formatter/
-└── gr-search/
+.
+├── skills/
+│   ├── gr-chinese-typography-rules/
+│   ├── gr-content-ai-avoid/
+│   ├── gr-ob-fix-color-tags/
+│   ├── gr-ob-rm-prompts-formatter/
+│   └── gr-search/
+└── tests/
+    └── gr-search/
+```
+
+## 开发与测试
+
+测试套件统一维护在根目录 `tests/` 下，与分发给 Agent 的 `skills/` 解耦。使用 `npx skills add` 安装 Skill 时，只会打包对应 `skills/<skill-name>` 目录，不会将测试代码分发至用户的 Agent 目录中。
+
+在仓库根目录下运行测试（无需安装项目依赖，由 `uv` 临时拉取 pytest）：
+
+```bash
+uv run --python "$(which python3)" --with pytest --with click pytest tests/gr-search/ -q
+```
+
+运行变异自检（验证测试用例的有效性与缺陷捕获能力）：
+
+```bash
+uv run --python "$(which python3)" --with pytest --with click python tests/gr-search/mutants.py
 ```
 
 ## License

@@ -28,6 +28,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 import config as cfgmod
@@ -39,12 +40,75 @@ EXTRACT_TIMEOUT = 60
 AUTHORITY_LABEL = {1: "非常权威", 2: "正常权威", 3: "一般权威", 4: "一般不权威"}
 
 _TIME_RANGE_ENUM = {"OneDay", "OneWeek", "OneMonth", "OneYear"}
-_TIME_RANGE_SPAN = re.compile(r"^\d{4}-\d{2}-\d{2}\.\.\d{4}-\d{2}-\d{2}$")
+# 用 fullmatch 而不是 match + ^$：`$` 也匹配串尾换行之前的位置，
+# 于是 "2026-01-01..2026-09-04\n" 会被判为合法并原样发给上游。
+_TIME_RANGE_SPAN = re.compile(r"(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})")
+
+TIME_RANGE_HINT = "应为 OneDay/OneWeek/OneMonth/OneYear 或 YYYY-MM-DD..YYYY-MM-DD（起始日期不得晚于结束日期）"
 
 
-def _valid_time_range(value: str) -> bool:
-    """校验 --time-range 是否符合官方枚举/日期区间格式，见 references/doubao-api.md。"""
-    return value in _TIME_RANGE_ENUM or bool(_TIME_RANGE_SPAN.match(value))
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+# Parallel 官方建议每条 3~6 个词、给 2~3 条，上限 5 条
+MAX_KEYWORDS = 5
+# 缓存命名空间与 transport 无关：同一份请求无论走 CLI 还是 HTTP 都命中同一条缓存
+PARALLEL_CACHE_NS = "parallel"
+
+
+def normalize_keywords(queries: list[str] | None) -> list[str]:
+    """关键词的**唯一**规范化入口：去空白、丢空串、截到上游上限。
+
+    CLI 通路、HTTP 通路和缓存指纹必须共用这一份结果，三处各写各的会让指纹
+    和真正发出去的请求对不上：["", "a".."e"] 与 ["a".."e"] 曾算出相同指纹，
+    而 CLI 实际发的是「空串 + a..d」和「a..e」——两个不同的请求共用了同一份缓存。
+    """
+    return [q.strip() for q in (queries or []) if q and q.strip()][:MAX_KEYWORDS]
+
+
+def resolve_search_queries(objective: str, queries: list[str] | None) -> list[str]:
+    """两条通路最终发出的 search_queries——**唯一**的决定处。
+
+    /v1/search 的 search_queries 是必填项，没给 --pq 时只能用 objective 兜一条。
+    CLI 过去在这种情况下不传任何 -q，于是同一个逻辑查询在装了 parallel-cli 的机器上
+    和没装的机器上发的是**不同的请求**、可能拿到不同的结果——而 transport 走 auto 时
+    用户根本不知道自己走的是哪条。统一成一份之后两条通路发的东西一致，
+    缓存也就能共用一个命名空间，装卸 CLI 不再让缓存整个作废。
+    """
+    return normalize_keywords(queries) or [(objective or "").strip()[:120]]
+
+
+def valid_date(value: str) -> bool:
+    """严格 YYYY-MM-DD，再做真日历校验。两道都不能省：
+
+    - 只做正则：2026-13-45 格式对但不是存在的日期；
+    - 只做 fromisoformat：Python 3.11 起它还接受 20260904 和 2026-W01-1，
+      而报错文案和上游契约都只认 YYYY-MM-DD——放过去等于把格式问题推给服务端，
+      换来的是一个语焉不详的远端报错。
+    """
+    if not _ISO_DATE.fullmatch(value or ""):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def valid_time_range(value: str) -> bool:
+    """校验 --time-range，见 references/doubao-api.md。
+
+    只对格式做正则匹配是不够的：2026-13-45 能通过正则但不是合法日期，
+    2026-09-03..2026-01-01 顺序颠倒，两者都会被上游按未定义行为处理。
+    """
+    if value in _TIME_RANGE_ENUM:
+        return True
+    match = _TIME_RANGE_SPAN.fullmatch(value)
+    if not match:
+        return False
+    start, end = match.group(1), match.group(2)
+    if not (valid_date(start) and valid_date(end)):
+        return False
+    return date.fromisoformat(start) <= date.fromisoformat(end)
 
 # 网页样板噪声：导航、页脚、文档站控件等，对回答无贡献但吃 token。
 # 允许外面套一层 markdown 链接——抓取结果里这些词通常是 [登录](https://...) 的形式。
@@ -59,6 +123,12 @@ _NOISE_LINE = re.compile(
 # 整行只有两个以上 markdown 链接、没有其他文字 —— 基本可以断定是导航条
 _LINK_ONLY_LINE = re.compile(r"^\s*(?:\[[^\]]*\]\([^)]*\)[\s|·,、]*){2,}$")
 _NOISE_WINDOW = 40  # 同一行在这个窗口内重复出现即视为导航重复
+# 只有**带 markdown 链接**的行才参与重复去除。
+# 无差别去重会静默删掉正文：两段结构相同的代码示例里，第二段的 `return None`
+# 直接消失；表格行、重复日志同理。而 SKILL.md 恰恰把 fetch 定位到文档站。
+# 导航条在抓取结果里本来就是链接行，限定到链接行既保住了原本的收益，
+# 又不会碰到正文——宁可漏删几行菜单，也不能删用户要读的内容。
+_HAS_LINK = re.compile(r"\[[^\]]*\]\([^)]*\)")
 # 零宽与方向控制字符：抓取内容里很常见，白占 token 还会干扰去重比对
 _ZERO_WIDTH = re.compile("[­​-‏‪-‮⁠﻿]")
 _BLANK_RUN = re.compile(r"\n{3,}")
@@ -80,7 +150,7 @@ def clean_text(text: str) -> str:
         if _NOISE_LINE.match(line) or _LINK_ONLY_LINE.match(line):
             continue
         stripped = line.strip()
-        if len(stripped) > 2:
+        if len(stripped) > 2 and _HAS_LINK.search(stripped):
             seen_at = recent.get(stripped)
             if seen_at is not None and index - seen_at <= _NOISE_WINDOW:
                 recent[stripped] = index
@@ -119,6 +189,10 @@ class SourceResult:
     cached: bool = False
     raw: Any = None
     request: Any = None
+    # 上游"成功但有保留"的信号（spec/input 校验告警、降级提示）。
+    # 它不是 error——请求成功了——但可能意味着请求没被完整执行，
+    # 只塞进 raw 等于让它消失：--no-dump 时连翻都没处翻。
+    warnings: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- 豆包
@@ -284,12 +358,8 @@ def _map_custom(body: dict) -> tuple[list[Doc], list[dict]]:
 def doubao_search(cfg: dict, query: str, opts: dict, dry_run: bool = False) -> SourceResult:
     """调用豆包 Custom 版。异常一律收敛成 SourceResult.error，不向上抛。"""
     name = "doubao"
-    time_range = opts.get("time_range")
-    if time_range and not _valid_time_range(time_range):
-        return SourceResult(
-            source=name,
-            error=f"--time-range 格式不对：{time_range}（应为 OneDay/OneWeek/OneMonth/OneYear 或 YYYY-MM-DD..YYYY-MM-DD）",
-        )
+    # 入参合法性由调用层在任何 source 调用之前统一校验（gr_search.validate_search_args），
+    # 这里不再重复检查：那样会产出一个没有 request 的 SourceResult，dry-run 读它就崩。
     payload = build_doubao_payload(query, opts, cfg)
     url = cfgmod.DOUBAO_URL
     request_info = {"url": url, "payload": payload}
@@ -302,7 +372,7 @@ def doubao_search(cfg: dict, query: str, opts: dict, dry_run: bool = False) -> S
 
     key = cfgmod.cache_key(name, payload)
     if not opts.get("no_cache"):
-        hit = cfgmod.cache_get(cfg, key)
+        hit = cfgmod.cache_get(cfg, key, ttl=opts.get("cache_ttl"))
         if hit is not None:
             docs, cards = _map_custom(hit)
             return SourceResult(name, docs, cards, cached=True, raw=hit, request=request_info)
@@ -347,12 +417,45 @@ def parallel_env(cfg: dict) -> dict[str, str]:
     """把 Parallel 密钥注入子进程环境；没有密钥就沿用本机 OAuth 凭据。
 
     走环境变量而不是命令行参数，密钥就不会出现在 ps 输出或 shell 历史里。
+
+    **注入的变量名永远是官方的 PARALLEL_API_KEY，不看 api_key_env。**
+    api_key_env 只是"从哪个变量读密钥"的输入别名，把它同时当成输出变量名有两个后果，
+    都实测过：
+    - 配成自定义名字 → CLI 读的仍是 PARALLEL_API_KEY，密钥根本没送到，鉴权静默失效；
+    - 配成 PYTHONWARNINGS 这类解释器控制变量 → 子进程把**完整密钥**打进 stderr，
+      而那段 stderr 又会被我们当作错误详情显示出来。
     """
     env = dict(os.environ)
-    secret, origin = cfgmod.parallel_key(cfg)
-    if secret and origin != "env":
-        env[cfg["parallel"].get("api_key_env") or cfgmod.PARALLEL_ENV_DEFAULT] = secret
+    # **先清掉继承来的那把**。只"有密钥就覆盖"是不够的：配了自定义 api_key_env
+    # 而该变量恰好没设时，我们解析不出密钥、doctor 如实报告"回落 OAuth"，
+    # 可父环境里残留的旧 PARALLEL_API_KEY 却仍会被子进程读到——
+    # 于是拿**另一个账号**的密钥去查询、计费、发送数据，而诊断信息还说没在用密钥。
+    # 子进程能用的密钥，必须与 parallel_key() 这一次解析出来的完全一致。
+    env.pop(cfgmod.PARALLEL_ENV_DEFAULT, None)
+    secret, _origin = cfgmod.parallel_key(cfg)
+    if secret:
+        # 判据是"CLI 读的那个变量里是不是这把密钥"，不是"密钥从哪来"。
+        # 曾经按 origin != "env" 跳过注入：配了自定义 api_key_env 并 export 之后，
+        # origin 是 env、于是不注入，而 CLI 读的仍是 PARALLEL_API_KEY——
+        # 环境里若残留一把旧的，子进程就拿旧密钥去鉴权，
+        # `config show` 显示的却是新的那把，两边对不上还查不出来。
+        env[cfgmod.PARALLEL_ENV_DEFAULT] = secret
     return env
+
+
+def redact(text: str, cfg: dict) -> str:
+    """把子进程输出里可能出现的密钥换成脱敏占位符。
+
+    纵深防御：即便注入的变量名已经收敛到官方名字，子进程仍可能因为别的原因
+    把环境变量回显出来（崩溃转储、调试开关、上游自己打日志）。
+    错误详情是要显示给用户的，出口这里再兜一道。
+    """
+    if not text:
+        return text
+    for secret, _ in (cfgmod.parallel_key(cfg), cfgmod.doubao_key(cfg)):
+        if secret and len(secret) >= 8:
+            text = text.replace(secret, "[已脱敏的密钥]")
+    return text
 
 
 def parallel_available(cfg: dict) -> bool:
@@ -381,8 +484,9 @@ def resolve_transport(cfg: dict) -> str | None:
 
 def build_parallel_cmd(cfg: dict, objective: str, queries: list[str], opts: dict, out_path: str) -> list[str]:
     conf = cfg["parallel"]
-    cmd = ["parallel-cli", "search", objective]
-    for keyword in (queries or [])[:5]:
+    cmd = ["parallel-cli", "search"]
+    # 显式传 -q，与 HTTP 通路发出的 search_queries 逐字一致
+    for keyword in resolve_search_queries(objective, queries):
         cmd += ["-q", keyword]
     cmd += [
         "--json",
@@ -397,10 +501,18 @@ def build_parallel_cmd(cfg: dict, objective: str, queries: list[str], opts: dict
         cmd += ["--session-id", str(opts["session_id"])]
     if opts.get("after_date"):
         cmd += ["--after-date", str(opts["after_date"])]
+    # 与 HTTP 通路保持同一套取舍：官方语义是 include 非空时 exclude 被忽略，
+    # 两边都只发其中一个，请求才真正等价
     if opts.get("sites"):
         cmd += ["--include-domains", ",".join(opts["sites"])]
-    if opts.get("block_hosts"):
+    elif opts.get("block_hosts"):
         cmd += ["--exclude-domains", ",".join(opts["block_hosts"])]
+    # objective 放在最后，并用 `--` 终止选项解析——它是用户/上层给的自由文本，
+    # 以 `-` 开头时会被 click 当成选项：`--help` 让 CLI 打印帮助后正常退出、
+    # 却不写结果文件（我们随后崩在 JSONDecodeError 上），`-` 被当成读 stdin 的哨兵。
+    # HTTP 通路没这个问题，于是 auto 模式下行为取决于本机装没装 CLI。
+    # （已用 CLI 自带的 click 8.5 验证 `--` 的行为，不是照惯例假设。）
+    cmd += ["--", objective]
     return cmd
 
 
@@ -412,11 +524,10 @@ def build_parallel_http_payload(cfg: dict, objective: str, queries: list[str], o
     additionalProperties: false，字段名写错会返回 422 而不是被静默忽略。
     """
     conf = cfg["parallel"]
-    # search_queries 是必填项；没给 --pq 时用 objective 兜一个，
     # 官方建议每条 3~6 个词、给 2~3 条效果最好
-    search_queries = [q for q in (queries or []) if q.strip()] or [objective.strip()[:120]]
+    search_queries = resolve_search_queries(objective, queries)
     payload: dict[str, Any] = {
-        "search_queries": search_queries[:5],
+        "search_queries": search_queries,
         "objective": objective,
         "mode": str(opts.get("mode") or conf["mode"]),
         "max_chars_total": int(conf["excerpt_max_chars_total"]),
@@ -444,17 +555,27 @@ def build_parallel_http_payload(cfg: dict, objective: str, queries: list[str], o
 def _parallel_cache_fingerprint(objective: str, queries: list[str], opts: dict, conf: dict) -> dict:
     """构造与 transport 细节（临时 -o 路径、每次都变的 session_id）无关的缓存指纹。
 
+    指纹相同就必须共用缓存，所以命名空间也必须与 transport 无关（都叫 parallel）——
+    否则装一下 parallel-cli、或把 transport 从 auto 改成 http，整个缓存就作废重付一遍。
+    前提是两条通路真的发同样的请求，这由 resolve_search_queries 保证。
+
     session_id 只是串联上下文用的关联 ID，不影响返回内容；把它纳入缓存键
     会导致相同的搜索参数每次都算作不同请求，30 分钟缓存实际永远不命中。
+
+    反过来，凡是会进入 wire request 的字段都必须**原样保序**纳入指纹：
+    关键词顺序会影响 Parallel 的检索结果，排序后不同的请求会错误地共用同一份缓存。
     """
     return {
         "objective": objective,
-        "queries": sorted(q.strip() for q in (queries or []) if q.strip()),
+        # 记录最终发出去的那份，而不是原始入参：两条通路都经过 resolve_search_queries
+        "queries": resolve_search_queries(objective, queries),
         "mode": str(opts.get("mode") or conf["mode"]),
         "max_results": int(opts.get("count") or conf["max_results"]),
         "excerpt_max_chars_total": int(conf["excerpt_max_chars_total"]),
-        "sites": sorted(opts.get("sites") or []),
-        "block_hosts": sorted(opts.get("block_hosts") or []),
+        # 与实际请求一致：include 非空时 exclude 被上游忽略，
+        # 把它纳入指纹只会制造发出去其实一模一样的两个请求各占一份缓存
+        "sites": list(opts.get("sites") or []),
+        "block_hosts": [] if opts.get("sites") else list(opts.get("block_hosts") or []),
         "after_date": opts.get("after_date"),
         "client_model": conf.get("client_model"),
     }
@@ -492,6 +613,35 @@ def _map_parallel(body: dict) -> list[Doc]:
     return docs
 
 
+_WARNING_KEYS = ("warnings", "spec_validation_warnings", "input_validation_warnings")
+
+
+def parallel_warnings(body: Any) -> list[str]:
+    """从 Parallel 响应里捞出"成功但有保留"的告警。
+
+    上游的告警形态不止一种（顶层 warnings、嵌在 meta 里、字符串或 {type,message} 对象），
+    所以这里按结构宽松地取，取不到就当没有——告警本身不该成为新的故障点。
+    """
+    out: list[str] = []
+    if not isinstance(body, dict):
+        return out
+    buckets: list[Any] = [body.get(k) for k in _WARNING_KEYS]
+    meta = body.get("meta")
+    if isinstance(meta, dict):
+        buckets += [meta.get(k) for k in _WARNING_KEYS]
+    for bucket in buckets:
+        if not isinstance(bucket, list):
+            continue
+        for entry in bucket:
+            if isinstance(entry, str):
+                out.append(entry)
+            elif isinstance(entry, dict):
+                kind = entry.get("type") or entry.get("code") or "warning"
+                message = entry.get("message") or entry.get("detail") or ""
+                out.append(f"{kind}: {message}".strip(": "))
+    return out
+
+
 def _parallel_search_http(cfg: dict, objective: str, queries: list[str], opts: dict) -> SourceResult:
     """不依赖 parallel-cli 的直连通路，只需要一个 API Key。"""
     payload = build_parallel_http_payload(cfg, objective, queries, opts)
@@ -499,12 +649,13 @@ def _parallel_search_http(cfg: dict, objective: str, queries: list[str], opts: d
     api_key, _ = cfgmod.parallel_key(cfg)
 
     key = cfgmod.cache_key(
-        "parallel-http", _parallel_cache_fingerprint(objective, queries, opts, cfg["parallel"])
+        PARALLEL_CACHE_NS, _parallel_cache_fingerprint(objective, queries, opts, cfg["parallel"])
     )
     if not opts.get("no_cache"):
-        hit = cfgmod.cache_get(cfg, key)
+        hit = cfgmod.cache_get(cfg, key, ttl=opts.get("cache_ttl"))
         if hit is not None:
-            return SourceResult("parallel", _map_parallel(hit), cached=True, raw=hit, request=request_info)
+            return SourceResult("parallel", _map_parallel(hit), cached=True, raw=hit,
+                                request=request_info, warnings=parallel_warnings(hit))
 
     started = time.monotonic()
     try:
@@ -521,7 +672,7 @@ def _parallel_search_http(cfg: dict, objective: str, queries: list[str], opts: d
     if not opts.get("no_cache"):
         cfgmod.cache_put(cfg, key, body)
     return SourceResult("parallel", _map_parallel(body), elapsed=time.monotonic() - started,
-                        raw=body, request=request_info)
+                        raw=body, request=request_info, warnings=parallel_warnings(body))
 
 
 def parallel_search(cfg: dict, objective: str, queries: list[str], opts: dict, dry_run: bool = False) -> SourceResult:
@@ -557,13 +708,14 @@ def parallel_search(cfg: dict, objective: str, queries: list[str], opts: dict, d
     cmd = build_parallel_cmd(cfg, objective, queries, opts, out_path)
 
     key = cfgmod.cache_key(
-        "parallel-cli", _parallel_cache_fingerprint(objective, queries, opts, cfg["parallel"])
+        PARALLEL_CACHE_NS, _parallel_cache_fingerprint(objective, queries, opts, cfg["parallel"])
     )
     if not opts.get("no_cache"):
-        hit = cfgmod.cache_get(cfg, key)
+        hit = cfgmod.cache_get(cfg, key, ttl=opts.get("cache_ttl"))
         if hit is not None:
             os.unlink(out_path)
-            return SourceResult("parallel", _map_parallel(hit), cached=True, raw=hit, request={"cmd": cmd})
+            return SourceResult("parallel", _map_parallel(hit), cached=True, raw=hit,
+                                request={"cmd": cmd}, warnings=parallel_warnings(hit))
 
     started = time.monotonic()
     try:
@@ -572,7 +724,7 @@ def parallel_search(cfg: dict, objective: str, queries: list[str], opts: dict, d
         )
         elapsed = time.monotonic() - started
         if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip()[:300]
+            detail = redact((proc.stderr or proc.stdout or "").strip(), cfg)[:300]
             hint = "（403 通常是余额不足，可运行 parallel-cli balance get）" if "403" in detail else ""
             return SourceResult(
                 "parallel", error=f"退出码 {proc.returncode}: {detail}{hint}",
@@ -598,7 +750,9 @@ def parallel_search(cfg: dict, objective: str, queries: list[str], opts: dict, d
 
     if not opts.get("no_cache"):
         cfgmod.cache_put(cfg, key, body)
-    return SourceResult("parallel", _map_parallel(body), elapsed=elapsed, raw=body, request={"cmd": cmd})
+    # CLI 与 HTTP 打的是同一个接口，告警也必须同样传出去
+    return SourceResult("parallel", _map_parallel(body), elapsed=elapsed, raw=body,
+                        request={"cmd": cmd}, warnings=parallel_warnings(body))
 
 
 def _extract_pages(body: dict) -> list[dict]:
@@ -650,6 +804,9 @@ def _parallel_extract_http(
         return [], f"{type(exc).__name__}: {exc}", warnings
 
     pages = _extract_pages(body)
+    # Search 那边补了顶层 warnings，Extract 这边一度还漏着：字段降级、
+    # 提取不完整都会被当成"完全成功"。两条路径的语义必须一致。
+    warnings += parallel_warnings(body)
     # /v1/extract 会把抓取失败的 URL 单独放在 errors 里，别当成"没有结果"
     failures = [f"{e.get('url')}: {e.get('error_type')}" for e in (body.get("errors") or [])]
     if not pages and failures:
@@ -671,28 +828,52 @@ def parallel_extract(
     if transport == "http":
         return _parallel_extract_http(cfg, urls, objective, max_chars, session_id=session_id)
 
+    # CLI 与 HTTP 打的是同一个 /v1/extract，20 个 URL 的上限和 session 语义都一样，
+    # 两条通路必须表现一致——auto 模式下装了 parallel-cli 走的正是这条。
+    warnings: list[str] = []
+    targets = urls[:20]
+    if len(urls) > 20:
+        warnings.append(f"仅抓取前 20 个 URL（Extract 单次上限 20），已丢弃 {len(urls) - 20} 个")
+
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         out_path = tmp.name
-    cmd = ["parallel-cli", "extract", *urls, "--json", "-o", out_path]
+    cmd = ["parallel-cli", "extract", "--json", "-o", out_path]
     if objective:
         # 有目标就取相关性摘录，而不是从页首截断的整页正文
         cmd += ["--objective", objective, "--excerpt-max-chars-total", str(max_chars)]
     else:
         # per-result 预算按 URL 数均分，让 max_chars 始终表示整次调用的输出预算
-        per_result = max(max_chars // max(len(urls), 1), 500)
-        cmd += ["--full-content", "--full-content-max-chars", str(per_result), "--no-excerpts"]
+        per_result = max(max_chars // max(len(targets), 1), 500)
+        # 不加 --no-excerpts：CLI 会在写输出文件时把 excerpts 删掉，
+        # 而上游 full_content 可能是 null——那时 HTTP 通路能回退到 excerpt，
+        # CLI 通路却只剩空正文还报成功。_extract_pages 的兜底得留着东西可兜。
+        cmd += ["--full-content", "--full-content-max-chars", str(per_result)]
+    if session_id:
+        cmd += ["--session-id", session_id]
+    # HTTP 通路一直在发 client_model，CLI 这边漏了——`parallel-cli extract --help`
+    # 明确支持 --client-model，两条路径必须发同样的请求
+    if cfg["parallel"].get("client_model"):
+        cmd += ["--client-model", str(cfg["parallel"]["client_model"])]
+    # URL 放最后并用 `--` 终止选项解析，和 build_parallel_cmd 里的 objective 同一处理。
+    # URL 多半来自上一次 search 落盘 JSON 的 docs[].url，是上游可控字段，以 `-` 开头时
+    # 会被 click 当成选项：`--help` 让 CLI 打印帮助后正常退出、却不写结果文件
+    # （我们随后崩在 JSONDecodeError 上），`--json` 这类干脆被吞成 flag、那个 URL
+    # 静默从请求里消失而我们照常报成功。HTTP 通路把 URL 放在 JSON body 里没这问题，
+    # 不修的话 auto 模式下行为取决于本机装没装 parallel-cli。
+    cmd += ["--", *targets]
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=EXTRACT_TIMEOUT, env=parallel_env(cfg)
         )
         if proc.returncode != 0:
-            return [], f"退出码 {proc.returncode}: {(proc.stderr or proc.stdout or '').strip()[:300]}", []
+            detail = redact((proc.stderr or proc.stdout or "").strip(), cfg)[:300]
+            return [], f"退出码 {proc.returncode}: {detail}", warnings
         with open(out_path, encoding="utf-8") as fh:
             body = json.load(fh)
     except subprocess.TimeoutExpired:
-        return [], f"抓取超时（{EXTRACT_TIMEOUT}s）", []
+        return [], f"抓取超时（{EXTRACT_TIMEOUT}s）", warnings
     except (OSError, json.JSONDecodeError) as exc:
-        return [], f"{type(exc).__name__}: {exc}", []
+        return [], f"{type(exc).__name__}: {exc}", warnings
     finally:
         try:
             os.unlink(out_path)
@@ -700,11 +881,12 @@ def parallel_extract(
             pass
 
     pages = _extract_pages(body)
-    # 与 HTTP 通路共享同一份响应契约（见 references/parallel-api.md），errors[] 同样不能当成"没有结果"
+    # 与 HTTP 通路共享同一份响应契约（见 references/parallel-api.md）：
+    # 顶层 warnings 和 errors[] 的处理都必须一致，errors[] 同样不能当成"没有结果"
+    warnings += parallel_warnings(body)
     failures = [f"{e.get('url')}: {e.get('error_type')}" for e in (body.get("errors") or [])]
     if not pages and failures:
-        return [], "; ".join(failures[:3]), []
-    warnings = []
+        return [], "; ".join(failures[:3]), warnings
     if failures:
         tail = " 等" if len(failures) > 3 else ""
         warnings.append(f"{len(failures)} 个 URL 抓取失败: " + "; ".join(failures[:3]) + tail)
