@@ -6,6 +6,8 @@ description: >
   支持网页搜索、图片搜索、正文抓取。全量结果落盘 JSON 供追问。
   触发词：搜索、查一下、联网搜、search、找资料、最新消息、豆包搜索、gr-search。
 allowed-tools: Bash(python3:*), Bash(parallel-cli:*)
+metadata:
+  version: "1.0.0"
 ---
 
 # gr-search —— 双路融合联网搜索
