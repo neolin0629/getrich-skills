@@ -84,6 +84,9 @@ def test_weak_fresh_is_not_necessarily_strong(query):
     ("https://www.example.com/a", "https://example.com/a"),
     ("https://example.com/a?utm_source=x", "https://example.com/a"),
     ("https://example.com/a?spm=1&b=2", "https://example.com/a?b=2"),
+    ("https://example.com/a?gclid=1", "https://example.com/a"),
+    ("https://example.com/a?yclid=1", "https://example.com/a"),
+    ("https://example.com/a?msclkid=1", "https://example.com/a"),
     ("https://example.com/a/", "https://example.com/a"),
     ("https://example.com/a/index.html", "https://example.com/a/"),
     ("https://m.example.com/a", "https://example.com/a"),
@@ -96,6 +99,9 @@ def test_urls_canonicalize_together(a, b):
 @pytest.mark.parametrize("a,b", [
     ("https://example.com/a", "https://example.com/b"),
     ("https://example.com/a?id=1", "https://example.com/a?id=2"),
+    ("https://example.com/viewtopic.php?t=123", "https://example.com/viewtopic.php?t=456"),
+    ("https://example.com/a?lang=en", "https://example.com/a?lang=zh"),
+    ("https://example.com/a?print", "https://example.com/a"),
 ])
 def test_distinct_urls_stay_distinct(a, b):
     assert fusion.canonical_url(a) != fusion.canonical_url(b)
@@ -135,14 +141,53 @@ def test_merge_records_alternate_url():
     assert merged[0].also_urls
 
 
-def test_reposts_merge_by_long_title():
-    """转载在各家站点的页眉页脚不同，正文 Jaccard 常够不到阈值，但标题逐字一致。"""
+def test_reposts_with_similar_content_still_merge():
+    """取消标题直通后，同一篇文章的转载仍按正文合并，并保留另一条来源链接。"""
     title = "国务院发布关于进一步优化营商环境的若干意见"
+    body = "持续优化营商环境，完善市场准入制度，保护各类经营主体的合法权益。" * 20
     merged = fusion.merge([
-        mkdoc("https://a.com/1", title=title, body="甲站的正文" * 20),
-        mkdoc("https://b.com/2", title=title, body="乙站完全不同的排版" * 20),
+        mkdoc("https://a.com/1", title=title, body=body),
+        mkdoc("https://b.com/2", title=title, body=body + "编辑：乙站", source="parallel"),
     ])
     assert len(merged) == 1
+    assert merged[0].sources == {"doubao": 1, "parallel": 1}
+    assert merged[0].also_urls == ["https://b.com/2"]
+
+
+@pytest.mark.parametrize("bodies", [
+    ("Acme builds wind turbines; annual revenue was USD 42 million.",
+     "Beacon operates supermarkets; annual revenue was EUR 930 million, driven by grocery sales."),
+    ("", ""),
+    ("", "Beacon operates supermarkets; annual revenue was EUR 930 million."),
+])
+def test_same_title_does_not_mix_independent_reports(bodies):
+    """跨公司同名年报或缺失正文时必须保留两个来源，不能把链接与营收正文拼错。"""
+    docs = [
+        mkdoc("https://acme.example/report", title="2025 Annual Report", body=bodies[0]),
+        mkdoc("https://beacon.example/report", title="2025 Annual Report",
+              body=bodies[1], source="parallel"),
+    ]
+    merged = fusion.merge(docs)
+    assert [(d.url, d.body, d.sources) for d in merged] == [
+        (d.url, d.body, {d.source: d.rank}) for d in docs
+    ]
+
+
+@pytest.mark.parametrize("param", [
+    "t", "lang", "from", "source", "src", "ref", "redirect", "timestamp", "sid", "weibo_id",
+    "ga_page", "fb_page", "gclid_page",
+])
+def test_content_query_parameters_do_not_merge_distinct_pages(param):
+    """通用参数和形似跟踪参数的名称可能标识内容，不能删除后用同 URL 规则强行合并。"""
+    docs = [
+        mkdoc(f"https://example.com/page?{param}=123", title="风电设备", body="风力发电设备研发"),
+        mkdoc(f"https://example.com/page?{param}=456", title="商店经营",
+              body="超级市场销售日常生活用品", source="parallel"),
+    ]
+    merged = fusion.merge(docs)
+    assert [(d.url, d.body, d.sources) for d in merged] == [
+        (d.url, d.body, {d.source: d.rank}) for d in docs
+    ]
 
 
 def test_short_generic_titles_do_not_merge():

@@ -324,8 +324,13 @@ def run_fetch(args: argparse.Namespace, cfg: dict) -> int:
         print(f"--max-chars 必须 ≥ 1（收到 {args.max_chars}）", file=sys.stderr)
         return 2
 
+    urls = [u.strip() for u in args.urls if u and u.strip()]
+    if not urls:
+        print("URL 列表不能为空", file=sys.stderr)
+        return 2
+
     pages, error, warnings = sources.parallel_extract(
-        cfg, args.urls, args.objective, args.max_chars, session_id=args.session_id
+        cfg, urls, args.objective, args.max_chars, session_id=args.session_id
     )
     # 部分失败的 warning 里拼着上游返回的 URL 和 error_type，是不可信内容，
     # 和正文一样要中和边界标记、一样要进围栏——它只是"较短的上游文本"，不是元信息。

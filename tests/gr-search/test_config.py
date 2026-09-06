@@ -593,3 +593,16 @@ def test_dangerous_env_name_may_be_echoed(load_config_from):
     那是个变量名不是密钥，说出来才好排查。"""
     cfg, err = load_config_from('{"parallel": {"api_key_env": "PATH"}}')
     assert "PATH" in err
+
+
+def test_prompt_and_store_key_non_tty_points_to_gr_search(capsys, monkeypatch):
+    """在非交互式终端下运行 set-key 时，提示的终端命令必须指向主入口 gr_search.py，
+    而不是没有 CLI 行为的 config.py。"""
+    import sys
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    code = cfgmod.prompt_and_store_key("doubao")
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "gr_search.py config set-key doubao" in err
+    assert "config.py config set-key" not in err

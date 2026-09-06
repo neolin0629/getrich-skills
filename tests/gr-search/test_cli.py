@@ -65,6 +65,51 @@ def test_time_range_vocabulary(value, ok):
     assert sources.valid_time_range(value) is ok
 
 
+# ---------------------------------------------------------------- 错误脱敏
+
+
+@pytest.mark.parametrize("error_location", ["metadata", "result", "exception"])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_doubao_business_errors_redact_keys_in_output_and_dump(
+    monkeypatch, capsys, tmp_path, error_location, json_output
+):
+    """HTTP 200 的两种业务错误和网络异常不得把回显密钥带到终端或落盘错误中。"""
+    import copy
+    import json
+
+    secret = "sk-SENTINEL-business-error-1234567890"
+    cfg = copy.deepcopy(cfgmod.DEFAULTS)
+    cfg["doubao"]["api_key"] = secret
+    cfg["output"]["dump_dir"] = str(tmp_path)
+    monkeypatch.delenv(cfgmod.DOUBAO_ENV, raising=False)
+    monkeypatch.setattr(sources.time, "sleep", lambda _: None)
+
+    def fake_post(*args, **kwargs):
+        message = f"Invalid key: {secret}"
+        if error_location == "exception":
+            raise OSError(message)
+        if error_location == "metadata":
+            return {"ResponseMetadata": {"Error": {"Code": "10403", "Message": message}}}
+        return {"Result": {"ErrorCode": 10403, "ErrorMsg": message}}
+
+    monkeypatch.setattr(sources, "_post_json", fake_post)
+    argv = ["search", "测试", "--source", "doubao", "--no-cache"]
+    if json_output:
+        argv.append("--json")
+    gr_search.run_search(gr_search.build_parser().parse_args(argv), cfg)
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    dumps = list(tmp_path.glob("*.json"))
+    assert len(dumps) == 1
+    dumped = dumps[0].read_text(encoding="utf-8")
+    for text in (output, dumped):
+        assert secret not in text
+        assert "Invalid key: [已脱敏的密钥]" in text
+    assert json.loads(dumped)["errors"]
+    if json_output:
+        assert json.loads(captured.out)["errors"]
+
+
 # ---------------------------------------------------------------- session 语义
 
 

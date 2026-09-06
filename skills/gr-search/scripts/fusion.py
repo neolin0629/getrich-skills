@@ -22,13 +22,11 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sources import Doc
 
-# 跟踪与会话参数，去掉后不影响页面内容
-_TRACKING_PREFIXES = ("utm_", "ga_", "fb_", "gclid", "yclid", "msclkid")
+# 只删除明确的跟踪参数；t、lang、source 等通用名称可能决定页面内容。
+_TRACKING_PREFIXES = ("utm_",)
 _TRACKING_EXACT = {
-    "spm", "from", "ref", "referer", "referrer", "source", "src", "scene", "chksm",
-    "share", "share_source", "share_medium", "share_token", "shareid", "sharer",
-    "lang", "redirect", "_t", "t", "timestamp", "sessionid", "session_id",
-    "wfr", "for", "sid", "seid", "vd_source", "isappinstalled", "weibo_id",
+    "spm", "gclid", "yclid", "msclkid", "vd_source",
+    "share_source", "share_medium", "share_token", "shareid",
 }
 _HOST_PREFIXES = ("www.", "m.", "mobile.", "wap.", "amp.")
 _PUNCT = re.compile(r"[\s　-〿＀-￯!-/:-@\[-`{-~]+")
@@ -103,7 +101,7 @@ def canonical_url(url: str) -> str:
 
     kept = [
         (k, v)
-        for k, v in parse_qsl(parts.query, keep_blank_values=False)
+        for k, v in parse_qsl(parts.query, keep_blank_values=True)
         if k.lower() not in _TRACKING_EXACT
         and not any(k.lower().startswith(p) for p in _TRACKING_PREFIXES)
     ]
@@ -117,16 +115,6 @@ def canonical_url(url: str) -> str:
         path = path.rstrip("/")
 
     return urlunsplit(("", host, path, urlencode(sorted(kept)), ""))
-
-
-# 标题短于这个长度就不做同标题合并——"北京天气预报"这类通用标题
-# 在不同站点上确实是不同页面，长标题才是转载的可靠信号
-_TITLE_MIN = 8
-
-
-def _norm_title(title: str) -> str:
-    """标题归一化，用于识别跨站转载。"""
-    return _PUNCT.sub("", (title or "")).lower()
 
 
 def _shingles(text: str, size: int = 3) -> set[str]:
@@ -212,7 +200,6 @@ def merge(docs: list[Doc], threshold: float = 0.75) -> list[Merged]:
     """两级去重。输入按源顺序给出，豆包在前，同分时豆包的版本胜出。"""
     merged: list[Merged] = []
     by_url: dict[str, Merged] = {}
-    by_title: dict[str, Merged] = {}
     shingle_cache: list[set[str]] = []
 
     for doc in docs:
@@ -223,27 +210,19 @@ def merge(docs: list[Doc], threshold: float = 0.75) -> list[Merged]:
             by_url[key].absorb(doc)
             continue
 
-        # 同标题优先于正文相似度：新闻转载在各家站点的页眉页脚不同，
-        # 正文 Jaccard 常常够不到阈值，但标题是逐字一致的。
-        tkey = _norm_title(doc.title)
-        hit: Merged | None = by_title.get(tkey) if len(tkey) >= _TITLE_MIN else None
-
-        if hit is None:
-            signature = _shingles(doc.body)
-            if signature:
-                for existing, existing_sig in zip(merged, shingle_cache):
-                    if _jaccard(signature, existing_sig) >= threshold:
-                        hit = existing
-                        break
-        else:
-            signature = _shingles(doc.body)
+        # 同名年报等独立文档很常见；标题相同不能替代正文一致性的证据。
+        hit: Merged | None = None
+        signature = _shingles(doc.body)
+        if signature:
+            for existing, existing_sig in zip(merged, shingle_cache):
+                if _jaccard(signature, existing_sig) >= threshold:
+                    hit = existing
+                    break
 
         if hit is not None:
             hit.absorb(doc)
             if key:
                 by_url.setdefault(key, hit)
-            if len(tkey) >= _TITLE_MIN:
-                by_title.setdefault(tkey, hit)
             continue
 
         entry = _from_doc(doc)
@@ -251,8 +230,6 @@ def merge(docs: list[Doc], threshold: float = 0.75) -> list[Merged]:
         shingle_cache.append(signature)
         if key:
             by_url[key] = entry
-        if len(tkey) >= _TITLE_MIN:
-            by_title[tkey] = entry
     return merged
 
 

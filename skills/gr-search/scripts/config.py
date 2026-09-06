@@ -375,7 +375,7 @@ def doubao_key(cfg: dict[str, Any]) -> tuple[str, str]:
     env_value = os.environ.get(DOUBAO_ENV, "").strip()
     if env_value:
         return env_value, "env"
-    stored = str(cfg["doubao"].get("api_key") or "").strip()
+    stored = str((cfg.get("doubao") or {}).get("api_key") or "").strip()
     if stored:
         return stored, "config"
     return "", "none"
@@ -383,11 +383,11 @@ def doubao_key(cfg: dict[str, Any]) -> tuple[str, str]:
 
 def parallel_key(cfg: dict[str, Any]) -> tuple[str, str]:
     """返回 (密钥, 来源)。没有密钥时回落到 parallel-cli 本机 OAuth 凭据。"""
-    env_name = cfg["parallel"].get("api_key_env") or PARALLEL_ENV_DEFAULT
+    env_name = (cfg.get("parallel") or {}).get("api_key_env") or PARALLEL_ENV_DEFAULT
     env_value = os.environ.get(env_name, "").strip()
     if env_value:
         return env_value, "env"
-    stored = str(cfg["parallel"].get("api_key") or "").strip()
+    stored = str((cfg.get("parallel") or {}).get("api_key") or "").strip()
     if stored:
         return stored, "config"
     return "", "none"
@@ -426,7 +426,7 @@ def prompt_and_store_key(target: str) -> int:
         print(
             "set-key 需要在交互式终端中运行，以免密钥进入命令行历史或日志。\n"
             "请你本人在终端执行：\n"
-            f"  python3 {Path(__file__).resolve()} config set-key {target}",
+            f"  python3 {Path(__file__).resolve().parent / 'gr_search.py'} config set-key {target}",
             file=sys.stderr,
         )
         return 2

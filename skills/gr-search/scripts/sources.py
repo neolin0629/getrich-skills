@@ -390,7 +390,7 @@ def doubao_search(cfg: dict, query: str, opts: dict, dry_run: bool = False) -> S
                 continue
             break
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:200]
+            detail = redact(exc.read().decode("utf-8", "replace"), cfg)[:200]
             error, body = f"HTTP {exc.code} {detail}", None
             break
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
@@ -402,7 +402,9 @@ def doubao_search(cfg: dict, query: str, opts: dict, dry_run: bool = False) -> S
 
     elapsed = time.monotonic() - started
     if error or body is None:
-        return SourceResult(name, error=error or "未知错误", elapsed=elapsed, request=request_info)
+        # 业务错误和网络异常也可能回显密钥，统一在错误出口脱敏。
+        return SourceResult(name, error=redact(error or "未知错误", cfg),
+                            elapsed=elapsed, request=request_info)
 
     docs, cards = _map_custom(body)
     if not opts.get("no_cache"):
@@ -661,7 +663,7 @@ def _parallel_search_http(cfg: dict, objective: str, queries: list[str], opts: d
     try:
         body = _post_parallel("/v1/search", payload, api_key, PARALLEL_TIMEOUT)
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:300]
+        detail = redact(exc.read().decode("utf-8", "replace"), cfg)[:300]
         hint = "（402/403 通常是余额不足，可运行 parallel-cli balance get）" if exc.code in (402, 403) else ""
         return SourceResult("parallel", error=f"HTTP {exc.code} {detail}{hint}",
                             elapsed=time.monotonic() - started, request=request_info)
@@ -799,7 +801,8 @@ def _parallel_extract_http(
     try:
         body = _post_parallel("/v1/extract", payload, api_key, EXTRACT_TIMEOUT)
     except urllib.error.HTTPError as exc:
-        return [], f"HTTP {exc.code} {exc.read().decode('utf-8', 'replace')[:300]}", warnings
+        detail = redact(exc.read().decode("utf-8", "replace"), cfg)[:300]
+        return [], f"HTTP {exc.code} {detail}", warnings
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
         return [], f"{type(exc).__name__}: {exc}", warnings
 

@@ -497,3 +497,94 @@ def test_dash_urls_survive_click_parsing(monkeypatch):
     result = CliRunner().invoke(fake_extract, cmd[2:])
     assert result.exit_code == 0
     assert result.output.split() == urls, "URL 仍被当成选项解析"
+
+
+@pytest.mark.parametrize("bad_urls", [[], [""], ["   "], ["", "   "]])
+def test_run_fetch_rejects_empty_or_whitespace_urls(capsys, bad_urls):
+    """fetch 收到空 URL 或纯空白 URL 时应当直接返回错误码 2，而不是向下打崩上游。"""
+    args = argparse.Namespace(urls=bad_urls, objective=None, max_chars=12000, session_id=None)
+    code = gr_search.run_fetch(args, {})
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "URL 列表不能为空" in err
+
+
+def test_run_fetch_strips_valid_urls(monkeypatch):
+    """fetch 应当清洗 URL 两端的空白字符再发给上游。"""
+    passed_urls = []
+
+    def stub_extract(cfg, urls, *a, **k):
+        passed_urls.extend(urls)
+        return [], None, []
+
+    monkeypatch.setattr(gr_search.sources, "parallel_extract", stub_extract)
+    args = argparse.Namespace(urls=["  https://a.com  ", "https://b.com/ "],
+                              objective=None, max_chars=12000, session_id=None)
+    gr_search.run_fetch(args, {})
+    assert passed_urls == ["https://a.com", "https://b.com/"]
+
+
+def test_extract_http_error_redacts_secrets(monkeypatch):
+    """HTTP 403/401 报错如果包含密钥，必须在出口被脱敏。"""
+    import io
+    import urllib.error
+    import sources
+
+    secret = "sk-SENTINEL-secret-value-9876543210"
+    cfg = {"parallel": {"api_key": secret, "client_model": "test"}}
+
+    class _ErrResponse(io.BytesIO):
+        def __init__(self):
+            super().__init__(f"Invalid key: {secret}".encode("utf-8"))
+
+    def fake_post(*a, **k):
+        raise urllib.error.HTTPError("https://api.parallel.ai/v1/extract", 401, "Unauthorized", {}, _ErrResponse())
+
+    monkeypatch.setattr(sources, "_post_parallel", fake_post)
+    pages, error, warnings = sources._parallel_extract_http(cfg, ["https://example.com"], None, 12000)
+    assert secret not in error
+    assert "[已脱敏的密钥]" in error
+
+
+def test_doubao_http_error_redacts_secrets(monkeypatch):
+    """豆包 HTTP 错误若回显密钥，也必须在出口被脱敏。"""
+    import io
+    import urllib.error
+    import sources
+
+    secret = "sk-SENTINEL-doubao-secret-value-123"
+    cfg = {"doubao": {"api_key": secret, "count": 10}}
+
+    class _ErrResponse(io.BytesIO):
+        def __init__(self):
+            super().__init__(f"Invalid bearer {secret}".encode("utf-8"))
+
+    def fake_post(*a, **k):
+        raise urllib.error.HTTPError("https://open.feedcoopapi.com", 401, "Unauthorized", {}, _ErrResponse())
+
+    monkeypatch.setattr(sources, "_post_json", fake_post)
+    result = sources.doubao_search(cfg, "测试", {"no_cache": True})
+    assert result.error and secret not in result.error
+    assert "[已脱敏的密钥]" in result.error
+
+
+def test_parallel_search_http_error_redacts_secrets(monkeypatch):
+    """Parallel Search HTTP 错误若回显密钥，也必须在出口被脱敏。"""
+    import io
+    import urllib.error
+    import sources
+
+    secret = "sk-SENTINEL-parallel-secret-value-456"
+    cfg = {"parallel": {"api_key": secret, "mode": "basic", "excerpt_max_chars_total": 1000, "max_results": 10}}
+
+    class _ErrResponse(io.BytesIO):
+        def __init__(self):
+            super().__init__(f"Invalid parallel-key: {secret}".encode("utf-8"))
+
+    def fake_post(*a, **k):
+        raise urllib.error.HTTPError("https://api.parallel.ai/v1/search", 403, "Forbidden", {}, _ErrResponse())
+
+    monkeypatch.setattr(sources, "_post_parallel", fake_post)
+    result = sources._parallel_search_http(cfg, "测试", ["关键词"], {"no_cache": True})
+    assert result.error and secret not in result.error
+    assert "[已脱敏的密钥]" in result.error
