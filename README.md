@@ -70,6 +70,7 @@ python3 skills/gr-search/scripts/gr_search.py config set-key doubao
 │   ├── gr-ob-rm-prompts-formatter/
 │   └── gr-search/
 └── tests/
+    ├── gr-content-ai-avoid/
     └── gr-search/
 ```
 
@@ -80,7 +81,7 @@ python3 skills/gr-search/scripts/gr_search.py config set-key doubao
 在仓库根目录下运行测试（无需安装项目依赖，由 `uv` 临时拉取 pytest）：
 
 ```bash
-uv run --python "$(which python3)" --with pytest --with click pytest tests/gr-search/ -q
+uv run --python "$(which python3)" --with pytest --with click pytest tests/ -q
 ```
 
 运行变异自检（验证测试用例的有效性与缺陷捕获能力）：
