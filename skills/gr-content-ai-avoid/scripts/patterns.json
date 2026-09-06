@@ -48,13 +48,17 @@
       "name": "连接词",
       "severity": "mid",
       "hint": "写完数一遍，删掉一半。",
-      "density_per_sentence": { "default": 0.25, "video": 0.15, "academic": 0.35 },
+      "min_allowed_count": 1,
+      "density_per_sentence": { "default": 0.25, "video": 0.15, "academic": 0.35, "persona": 0.5 },
       "words": [
         "然而", "但是", "不过", "因此", "所以说", "于是", "此外", "另外",
-        "首先", "其次", "再次", "最后", "第一", "第二", "第三",
+        "首先", "其次", "再次",
         "事实上", "实际上", "而事实上", "与此同时", "同时", "并且", "而且",
         "尽管如此", "即便如此", "尽管", "虽然", "不仅如此", "更进一步",
         "值得注意的是", "需要强调的是", "由此", "从而", "进而", "综上"
+      ],
+      "regex": [
+        { "pattern": "(?:^|[。！？；\\n])[ \\t]*(第一|第二|第三|最后)(?=[，、：:])", "match_group": 1, "desc": "分项连接词" }
       ]
     },
 
@@ -153,7 +157,7 @@
       "severity": "high",
       "hint": "具体说发生了什么。不做「一方面……另一方面……展望未来」的包装。",
       "words": [
-        "尽管面临", "尽管存在这些", "尽管如此", "虽然仍面临", "面临诸多挑战",
+        "尽管面临", "尽管存在这些", "虽然仍面临", "面临诸多挑战",
         "展望未来", "放眼未来", "未来可期", "值得期待", "任重道远", "道阻且长",
         "机遇与挑战并存", "危中有机", "有望迎来", "有望实现"
       ]
@@ -207,7 +211,7 @@
     "R1_uncertainty_markers": {
       "name": "不确定表达（这是要保留的，不是要删的）",
       "severity": "low",
-      "hint": "全文一处都没有 → 一定像 AI。至少写出一处你的判断边界。",
+      "hint": "观点、经验或分析类内容应如实写明判断边界；没有真实不确定性时不要硬加。",
       "is_positive_signal": true,
       "words": [
         "我不确定", "不太确定", "不确定", "我也不知道", "我不知道",
@@ -226,13 +230,13 @@
       "severity": "high",
       "hint": "真的只有两项写两项，四项写四项。",
       "patterns": [
-        { "pattern": "([^，。！？、；]{2,8})、([^，。！？、；]{2,8})、([^，。！？、；]{2,8})(?![、])", "desc": "顿号三项", "check": "similar_length" }
+        { "pattern": "(?<![^，。！？；\\n])[^，。！？、；\\n]+(?:、[^，。！？、；\\n]+){2,}", "desc": "顿号三项", "check": "three_similar_items" }
       ]
     },
     "S3": {
       "name": "「不是 X 是 Y」高密度",
       "severity": "high",
-      "hint": "全文最多一次。800 字内 3 次以上才判定。",
+      "hint": "全文最多一次。任一 800 字正文窗口内至少 3 次才判定，重叠句式只计一次。",
       "density_per_800": 3,
       "patterns": [
         { "pattern": "不(是|只是|仅仅是|仅是)[^。！？]{1,30}(，|；)?(而)?是", "desc": "不是 X 是 Y" },
@@ -278,7 +282,7 @@
       "hint": "说回那个具体的判断。",
       "patterns": [
         { "pattern": "[^，。！？]{2,10}是[^，。！？]{2,10}的(语言|货币|镜子|底色|尺度|注脚|一部分|另一面)", "desc": "X 是 Y 的 Z" },
-        { "pattern": "[^，。！？]{2,10}不是[^，。！？]{2,10}，(而)?是[^，。！？]{2,10}[。！？]", "desc": "X 不是 Y，是 Z" },
+        { "pattern": "[^，。！？]{2,10}不是[^，。！？]{2,10}，(而)?是[^，。！？]{0,10}(镜子|底色|尺度|注脚|学费|货币)[。！？]", "desc": "X 不是 Y，是比喻性结论" },
         { "pattern": "(时间|市场|人性|认知|复利)是最好的[^，。！？]{2,10}", "desc": "X 是最好的 Y" },
         { "pattern": "[^，。！？]{2,12}的(底层逻辑|第一性原理|本质)[是在]", "desc": "……的底层逻辑是" }
       ]
@@ -294,7 +298,7 @@
         { "pattern": "有没有(发现|想过|遇到过)", "desc": "钩子：有没有发现……" },
         { "pattern": "(为什么|凭什么)[^。！？]{2,20}(却|但)[^。！？]{2,20}[？?]", "desc": "钩子：为什么 X 却 Y？" },
         { "pattern": "(读完|看完)(这篇|本文|这条)[^。！？]{0,20}(你将|你会|就能|你就)", "desc": "承诺：读完你将……" },
-        { "pattern": "(其实|真相是|问题(就)?出在)[^。！？]{2,20}", "desc": "痛点归因：其实是因为……", "min_position": 0 },
+        { "pattern": "(其实|真相是|问题(就)?出在)[^。！？]{2,20}", "desc": "痛点归因：其实是因为……" },
         { "pattern": "(今天|本文|这篇)(就)?(来|和你|跟大家)(聊|说|讲|分享)", "desc": "预告式开场" }
       ]
     },
@@ -364,53 +368,51 @@
       "hint": "加一句 2–5 字的短句，或一句 40 字以上的长句。",
       "warn_below": 0.35,
       "strong_below": 0.25,
-      "min_sentences": 8,
-      "skip_genres": ["xhs-short", "weibo", "persona"]
+      "min_sentences": 8
     },
     "S7_punchline_rate": {
       "name": "段末金句率",
       "severity": "mid",
       "hint": "全文最多一两个爆发的句子，其他段落让它自然结束。",
       "warn_above": 0.6,
-      "min_paragraphs": 4,
-      "skip_genres": ["video", "weibo", "xhs-short"]
+      "min_paragraphs": 4
     },
     "S7_staccato_run": {
       "name": "连续短句",
       "severity": "mid",
       "hint": "单句强调可以，连打三四句就是在演。",
       "max_len": 8,
-      "min_run": 3,
-      "skip_genres": ["video", "xhs-short"]
+      "min_run": 3
     },
     "F1_dash_per_1k": {
       "name": "破折号密度",
       "severity": "mid",
       "hint": "优先换成句号、逗号、冒号、括号。",
-      "warn_above": 2.0
+      "warn_above": 2.0,
+      "min_allowed_count": 1
     },
     "F2_bold_per_1k": {
       "name": "粗体密度",
       "severity": "mid",
       "hint": "一屏内最多一处粗体。",
       "warn_above": 6.0,
+      "min_allowed_count": 1,
       "genre_override": { "xhs-short": 12.0, "xhs-long": 12.0 }
     },
     "F3_emoji_per_1k": {
       "name": "emoji 密度",
       "severity": "mid",
       "hint": "删掉。AI 高频的 🚀 💡 ✅ 📌 🔥 尤其显眼。",
-      "warn_above": 2.0,
-      "skip_genres": ["xhs-short", "xhs-long", "persona"]
+      "warn_above": 2.0
     },
-    "W1_per_1k": { "name": "AI 高频词密度", "severity": "high", "warn_above": 2.0 },
+    "W1_per_1k": { "name": "AI 高频词密度", "severity": "high", "warn_above": 2.0, "min_allowed_count": 2 },
     "R1_uncertainty_count": {
       "name": "不确定表达数量",
       "severity": "high",
-      "hint": "全文一处都没有 → 一定像 AI。写出你的判断边界。",
+      "hint": "量化分析应如实写明样本、场景或方法边界；不要为了过检制造犹豫。",
       "warn_below": 1,
       "min_chars": 400,
-      "skip_genres": ["academic", "copy"]
+      "enforce_genres": ["quant"]
     }
   },
 
@@ -419,7 +421,7 @@
     "wechat":    { "strict": ["S7_punchline_rate", "P5", "C7"], "skip": [] },
     "xhs-short": { "strict": ["P1", "P4", "C9"], "skip": ["S2_sentence_cv", "F3_emoji_per_1k", "S7_punchline_rate"] },
     "xhs-long":  { "strict": ["P1", "P4"], "skip": ["F3_emoji_per_1k", "P6"] },
-    "weibo":     { "strict": ["P1", "P4"], "skip": ["S2_sentence_cv", "S7_punchline_rate", "P6"] },
+    "weibo":     { "strict": ["P1", "P4"], "skip": ["S2_sentence_cv", "S7", "P6"] },
     "zhihu":     { "strict": ["C5", "C2"], "skip": [] },
     "video":     { "strict": ["P1", "W3"], "skip": ["S7_punchline_rate", "S7_staccato_run", "P2"] },
     "persona":   { "strict": ["R2", "R4", "P4"], "skip": ["S2_sentence_cv", "F3_emoji_per_1k"] },

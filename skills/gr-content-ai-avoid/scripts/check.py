@@ -4,7 +4,7 @@
 gr-content-ai-avoid 机械自检脚本。
 
 只检查可量化的 AI 写作指纹：高频词、结构句式、密度指标。
-语义层规则（C 层的判断、R 层的真实感）脚本测不了，靠人按 references/rules.md 过。
+C/R 层只有部分表面模式能机械提示，语义是否成立仍要靠人按 references/rules.md 判断。
 
 用法：
     python3 check.py 稿子.md
@@ -23,6 +23,7 @@ import json
 import math
 import re
 import sys
+from bisect import bisect_left
 from pathlib import Path
 
 SEV_ICON = {"high": "🔴", "mid": "⚠️", "low": "💡"}
@@ -56,14 +57,27 @@ def blank_out(text: str, pattern: re.Pattern) -> str:
     return "".join(out)
 
 
+def preserve_link_labels(text: str) -> str:
+    """屏蔽普通 Markdown 链接的标记和目标，保留读者可见的标签文本。"""
+    pattern = re.compile(r"(?<!!)\[([^\]\n]*)\]\([^)\n]*\)")
+    out = list(text)
+    for m in pattern.finditer(text):
+        label_start, label_end = m.span(1)
+        for i in range(m.start(), m.end()):
+            if not label_start <= i < label_end and out[i] != "\n":
+                out[i] = " "
+    return "".join(out)
+
+
 def preprocess(raw: str) -> str:
-    """屏蔽 frontmatter、代码块、行内代码、URL、HTML 标签、图片。偏移保持不变。"""
+    """屏蔽非正文区域，并保留普通链接的可见标签文本。偏移保持不变。"""
     text = raw
-    text = blank_out(text, re.compile(r"\A---\n.*?\n---\n", re.S))
+    text = blank_out(text, re.compile(r"\A---\r?\n.*?\r?\n---(?:\r?\n|\Z)", re.S))
     text = blank_out(text, re.compile(r"```.*?```", re.S))
     text = blank_out(text, re.compile(r"~~~.*?~~~", re.S))
     text = blank_out(text, re.compile(r"`[^`\n]+`"))
-    text = blank_out(text, re.compile(r"!?\[[^\]\n]*\]\([^)\n]*\)"))
+    text = blank_out(text, re.compile(r"!\[[^\]\n]*\]\([^)\n]*\)"))
+    text = preserve_link_labels(text)
     text = blank_out(text, re.compile(r"https?://\S+"))
     text = blank_out(text, re.compile(r"<[^>\n]{1,80}>"))
     return text
@@ -185,12 +199,14 @@ def scan_lexicon(text: str, lexicon: dict, active: set[str]) -> list[Hit]:
             except re.error:
                 continue
             for m in cre.finditer(text):
-                if any(mask[m.start():m.end()]):
+                group = rx.get("match_group", 0)
+                start, end = m.span(group)
+                if any(mask[start:end]):
                     continue
-                for k in range(m.start(), m.end()):
+                for k in range(start, end):
                     mask[k] = 1
-                hits.append(Hit(rule, cfg["name"], sev, m.start(), m.end(),
-                                m.group(0), rx.get("desc", ""), hint))
+                hits.append(Hit(rule, cfg["name"], sev, start, end,
+                                m.group(group), rx.get("desc", ""), hint))
     return hits
 
 
@@ -198,8 +214,36 @@ def count_positive(text: str, cfg: dict) -> int:
     return sum(text.count(w) for w in cfg.get("words", []))
 
 
+def count_non_overlapping_matches(text: str, cfg: dict) -> int:
+    """按最长优先统计单条规则的词和正则，避免嵌套表达重复计数。"""
+    spans: list[tuple[int, int]] = []
+    for word in sorted(cfg.get("words", []), key=len, reverse=True):
+        if "…" in word or not word.strip():
+            continue
+        spans.extend((m.start(), m.end()) for m in re.finditer(re.escape(word), text))
+    for rx in cfg.get("regex", []):
+        try:
+            cre = re.compile(rx["pattern"])
+        except re.error:
+            continue
+        group = rx.get("match_group", 0)
+        spans.extend(m.span(group) for m in cre.finditer(text))
+
+    mask = bytearray(len(text))
+    count = 0
+    for start, end in sorted(spans, key=lambda span: (-(span[1] - span[0]), span[0])):
+        if any(mask[start:end]):
+            continue
+        for i in range(start, end):
+            mask[i] = 1
+        count += 1
+    return count
+
+
 def scan_regex_rules(text: str, rules: dict, active: set[str], chars: int) -> list[Hit]:
     hits: list[Hit] = []
+    # 有效正文的位置用于窗口计数；匹配仍在原文本上进行，以保留行号和偏移。
+    body_offsets = [i for i, ch in enumerate(text) if content_len(ch)]
     for rule, cfg in rules.items():
         base = rule.split("_")[0]
         if rule not in active and base not in active:
@@ -213,10 +257,12 @@ def scan_regex_rules(text: str, rules: dict, active: set[str], chars: int) -> li
 
         scope = cfg.get("scope")
         if scope == "head":
-            region, base_off = text[: cfg.get("head_chars", 150)], 0
+            n = cfg.get("head_chars", 150)
+            end = body_offsets[n] if len(body_offsets) > n else len(text)
+            region, base_off = text[:end], 0
         elif scope == "tail":
             n = cfg.get("tail_chars", 200)
-            base_off = max(0, len(text) - n)
+            base_off = body_offsets[-n] if len(body_offsets) > n else 0
             region = text[base_off:]
         else:
             region, base_off = text, 0
@@ -230,14 +276,14 @@ def scan_regex_rules(text: str, rules: dict, active: set[str], chars: int) -> li
             for m in cre.finditer(region):
                 if rx.get("check") == "similar_length" and not _similar_len(m):
                     continue
+                if rx.get("check") == "three_similar_items" and not _three_similar_items(m):
+                    continue
                 raw.append(Hit(rule, cfg["name"], sev, base_off + m.start(),
                                base_off + m.end(), m.group(0), rx.get("desc", ""), hint))
 
         thr = cfg.get("density_per_800")
         if thr and chars > 0:
-            allowed = max(thr, math.ceil(chars / 800 * thr))
-            if len(raw) < allowed:
-                continue
+            raw = _dense_window_hits(raw, body_offsets, thr, 800)
         hits.extend(raw)
     return hits
 
@@ -248,6 +294,41 @@ def _similar_len(m: re.Match) -> bool:
         return False
     lens = [len(g) for g in gs[:3]]
     return max(lens) - min(lens) <= 2
+
+
+def _three_similar_items(m: re.Match) -> bool:
+    items = m.group(0).split("、")
+    if len(items) != 3:
+        return False
+    lens = [content_len(item) for item in items]
+    return min(lens) >= 2 and max(lens) <= 8 and max(lens) - min(lens) <= 2
+
+
+def _dense_window_hits(hits: list[Hit], body_offsets: list[int],
+                       minimum: int, window: int) -> list[Hit]:
+    """只保留参与局部高密度窗口的命中；重叠句式不重复计数。"""
+    distinct: list[Hit] = []
+    for hit in sorted(hits, key=lambda h: (h.start, -h.end)):
+        if not distinct or hit.start >= distinct[-1].end:
+            distinct.append(hit)
+
+    starts = [bisect_left(body_offsets, h.start) for h in distinct]
+    ends = [bisect_left(body_offsets, h.end) for h in distinct]
+    # 差分标记所有合格窗口，避免同一命中重复输出。
+    coverage = [0] * (len(distinct) + 1)
+    left = 0
+    for right, end in enumerate(ends):
+        while left <= right and end - starts[left] > window:
+            left += 1
+        if right - left + 1 >= minimum:
+            coverage[left] += 1
+            coverage[right + 1] -= 1
+    selected, depth = [], 0
+    for i, hit in enumerate(distinct):
+        depth += coverage[i]
+        if depth:
+            selected.append(hit)
+    return selected
 
 
 def _scan_lines(text: str, rule: str, cfg: dict, sev: str, hint: str) -> list[Hit]:
@@ -371,33 +452,45 @@ def compute_metrics(text: str, cfg_all: dict, genre: str, active: set[str],
         thr = c.get("warn_above", 99)
         thr = c.get("genre_override", {}).get(genre, thr)
         d = cnt / k
-        add(key.split("_")[0], label, f"{d:.1f} ({cnt})", f"≤ {thr}", d > thr,
+        min_allowed = c.get("min_allowed_count", 0)
+        bad = d > thr and cnt > min_allowed
+        threshold = f"≤ {thr}" + (f"；总数 ≤ {min_allowed} 豁免" if min_allowed else "")
+        add(key.split("_")[0], label, f"{d:.1f} ({cnt})", threshold, bad,
             c.get("severity", "mid"), c.get("hint", ""))
 
     # W1 密度
     c = cfg_all.get("W1_per_1k", {})
     if "W1_per_1k" in active and "W1" in lexicon:
-        cnt = sum(text.count(w) for w in lexicon["W1"].get("words", []))
+        cnt = count_non_overlapping_matches(text, lexicon["W1"])
         d = cnt / k
-        add("W1", "AI 高频词/千字", f"{d:.1f} ({cnt})", f"≤ {c.get('warn_above', 2.0)}",
-            d > c.get("warn_above", 2.0), "high", "")
+        min_allowed = c.get("min_allowed_count", 0)
+        bad = d > c.get("warn_above", 2.0) and cnt > min_allowed
+        threshold = f"≤ {c.get('warn_above', 2.0)}" + (f"；总数 ≤ {min_allowed} 豁免" if min_allowed else "")
+        add("W1", "AI 高频词/千字", f"{d:.1f} ({cnt})", threshold,
+            bad, "high", "")
 
     # W3 连接词密度
     if "W3" in lexicon and "W3" in active and sents:
         dens = lexicon["W3"].get("density_per_sentence", {})
         thr = dens.get(genre, dens.get("default", 0.25))
-        cnt = sum(text.count(w) for w in lexicon["W3"].get("words", []))
+        cnt = count_non_overlapping_matches(text, lexicon["W3"])
         d = cnt / len(sents)
-        add("W3", "连接词/句", f"{d:.2f} ({cnt}/{len(sents)})", f"≤ {thr}", d > thr,
+        min_allowed = lexicon["W3"].get("min_allowed_count", 0)
+        bad = d > thr and cnt > min_allowed
+        threshold = f"≤ {thr}" + (f"；总数 ≤ {min_allowed} 豁免" if min_allowed else "")
+        add("W3", "连接词/句", f"{d:.2f} ({cnt}/{len(sents)})", threshold, bad,
             "mid", lexicon["W3"].get("hint", ""))
 
     # R1 不确定表达（越少越糟）
     c = cfg_all.get("R1_uncertainty_count", {})
     key = "R1_uncertainty_markers"
-    if "R1_uncertainty_count" in active and key in lexicon and chars >= c.get("min_chars", 400):
+    enforce_genres = set(c.get("enforce_genres", []))
+    if ("R1_uncertainty_count" in active and key in lexicon
+            and chars >= c.get("min_chars", 400)
+            and (not enforce_genres or genre in enforce_genres)):
         cnt = count_positive(text, lexicon[key])
         add("R1", "不确定表达处数", cnt, f"≥ {c.get('warn_below', 1)}",
-            cnt < c.get("warn_below", 1), "high", c.get("hint", ""))
+            cnt < c.get("warn_below", 1), c.get("severity", "mid"), c.get("hint", ""))
 
     return rows
 
@@ -419,19 +512,36 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
     text = preprocess(raw)
     active = build_active(cfg, genre)
     chars = content_len(text)
+    aggregate_rules = {"W1", "W3"}
 
-    hits = scan_lexicon(text, cfg["lexicon"], active)
+    # 聚合规则独立扫描，避免跨规则掩码吞掉超标规则的定位。
+    hits = scan_lexicon(text, cfg["lexicon"], active - aggregate_rules)
     hits += scan_regex_rules(text, cfg["regex_rules"], active, chars)
     hits += scan_empty_headers(text, active)
-    hits.sort(key=lambda h: h.start)
 
     metrics = compute_metrics(text, cfg["metrics"], genre, active, cfg["lexicon"])
 
     # 体裁加严：strict 列表里的规则，命中一律按强信号报
     strict = set(cfg["genres"].get(genre, {}).get("strict", []))
+    strict_bases = {s.split("_")[0] for s in strict}
+
+    def is_strict(rid: str) -> bool:
+        return rid in strict or rid.split("_")[0] in strict_bases
+
+    metrics_by_key = {m["key"]: m for m in metrics}
+    for rule in aggregate_rules:
+        if rule not in active or rule not in cfg["lexicon"]:
+            continue
+        rule_hits = scan_lexicon(text, {rule: cfg["lexicon"][rule]}, {rule})
+        metric = metrics_by_key.get(rule)
+        if rule_hits and metric and is_strict(rule):
+            metric["flagged"] = True
+            metric["severity"] = "high"
+            metric["threshold"] += "；本体裁命中即加严"
+        if metric and metric["flagged"]:
+            hits.extend(rule_hits)
+
     if strict:
-        def is_strict(rid: str) -> bool:
-            return rid in strict or rid.split("_")[0] in {s.split("_")[0] for s in strict}
         for h in hits:
             if is_strict(h.rule):
                 h.sev = "high"
@@ -439,6 +549,7 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
             if m["flagged"] and is_strict(m["key"]):
                 m["severity"] = "high"
 
+    hits.sort(key=lambda h: h.start)
     starts = line_index(text)
     sents = split_sentences(text)
 
@@ -453,9 +564,9 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
         "hits": [h.as_dict(text, starts) for h in hits],
         "counts": counts,
         "severity_totals": {
-            "high": sum(1 for h in hits if h.sev == "high") +
+            "high": sum(1 for h in hits if h.sev == "high" and h.rule not in aggregate_rules) +
                     sum(1 for m in metrics if m["flagged"] and m["severity"] == "high"),
-            "mid": sum(1 for h in hits if h.sev == "mid") +
+            "mid": sum(1 for h in hits if h.sev == "mid" and h.rule not in aggregate_rules) +
                    sum(1 for m in metrics if m["flagged"] and m["severity"] == "mid"),
         },
         "strict": cfg["genres"].get(genre, {}).get("strict", []),
@@ -500,8 +611,8 @@ def render(res: dict, source: str, cfg: dict) -> str:
 
     out.append("\n---\n")
     out.append("脚本只查机械指标，**每一处都要人工复核再改**，会有误伤。")
-    out.append("语义层（C 层内容套路、R 层真实感）脚本测不了，按 `references/rules.md` 自己过一遍。")
-    out.append("尤其确认：全文有没有一处承认「我不确定 / 我没想清楚」（R1）——没有的话一定像 AI。")
+    out.append("C/R 层只有部分表面模式能机械提示，语义是否成立仍要按 `references/rules.md` 人工判断。")
+    out.append("观点、经验和分析类内容尤其要确认是否如实写明判断边界；没有真实不确定性时不要硬加。")
     return "\n".join(out)
 
 
@@ -536,7 +647,15 @@ def main() -> int:
         if not p.exists():
             print(f"找不到文件：{p}", file=sys.stderr)
             return 2
-        raw, source = p.read_text(encoding="utf-8", errors="replace"), p.name
+        if not p.is_file():
+            print(f"不是普通文件：{p}", file=sys.stderr)
+            return 2
+        try:
+            raw = p.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            print(f"读取文件失败：{p}：{e}", file=sys.stderr)
+            return 2
+        source = p.name
 
     if not raw.strip():
         print("文件为空。", file=sys.stderr)
