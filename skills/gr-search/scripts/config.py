@@ -20,6 +20,7 @@ import math
 import os
 import stat
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -72,9 +73,9 @@ DEFAULTS: dict[str, Any] = {
     },
     "fusion": {
         "weight_doubao": 1.0,
-        "weight_parallel": 0.7,
+        "weight_parallel": 1.0,
         "rrf_k": 60,
-        "dedup_jaccard": 0.75,
+        "dedup_jaccard": 0.9,
     },
     "output": {
         "profile": "standard",
@@ -93,7 +94,7 @@ DEFAULTS: dict[str, Any] = {
         "dir": str(CACHE_ROOT / "http"),
         "keep_entries": 500,
     },
-    "card_shortcircuit": True,
+    "card_shortcircuit": False,
 }
 
 PROFILE_BUDGETS = {"compact": 8000, "standard": 15000, "full": 30000}
@@ -357,14 +358,31 @@ def save_config(cfg: dict[str, Any]) -> None:
     """原子写入配置并强制 0600 权限（含密钥，不能给同机其他用户读到）。"""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(CONFIG_DIR, stat.S_IRWXU)
-    tmp = CONFIG_PATH.with_suffix(".json.tmp")
-    # 先建 0600 的空文件，再写内容，避免明文密钥有一瞬间是默认权限
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
-    os.replace(tmp, CONFIG_PATH)
-    os.chmod(CONFIG_PATH, stat.S_IRUSR | stat.S_IWUSR)
+    secure_write(CONFIG_PATH, json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+
+
+def migrate_defaults(apply: bool = False) -> dict[str, Any]:
+    """显式迁移三个行为设置；其余原始配置逐字段保留。默认只预览。"""
+    raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
+    if not isinstance(raw, dict) or not isinstance(raw.get("fusion", {}), dict):
+        raise ValueError("配置顶层与 fusion 必须是对象，请先修复配置")
+    changes = {}
+    for field, value in (("weight_doubao", 1.0), ("weight_parallel", 1.0)):
+        old = raw.get("fusion", {}).get(field, DEFAULTS["fusion"][field])
+        if old != value:
+            changes[f"fusion.{field}"] = {"before": old, "after": value}
+    if raw.get("card_shortcircuit", False) is not False:
+        changes["card_shortcircuit"] = {"before": raw["card_shortcircuit"], "after": False}
+    # 预览只显示固定行为字段；损坏值可能误填密钥，不回显任意字符串或对象。
+    for change in changes.values():
+        old = change["before"]
+        if not isinstance(old, (bool, int, float)):
+            change["before"] = "[非数值，已隐藏]"
+    if apply and changes:
+        raw.setdefault("fusion", {}).update(weight_doubao=1.0, weight_parallel=1.0)
+        raw["card_shortcircuit"] = False
+        save_config(raw)
+    return changes
 
 
 # ---------------------------------------------------------------- 密钥
@@ -500,15 +518,15 @@ def cache_get(cfg: dict[str, Any], key: str, ttl: int | None = None) -> Any | No
 
 
 def secure_write(path: Path, content: str) -> None:
-    """以 0600 权限写文件，避免全量结果/缓存以默认 umask（通常 0644）落盘。
-
-    os.open 的 mode 只在「创建」时生效，覆写既有文件不会收紧它的权限，
-    所以必须再 fchmod 一次——否则历史上以 0644 落盘的文件会一直保持可读。
-    """
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        os.fchmod(fh.fileno(), stat.S_IRUSR | stat.S_IWUSR)
-        fh.write(content)
+    """唯一临时文件以 0600 写完后原子替换，读者只见完整旧值或新值。"""
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            os.fchmod(fh.fileno(), stat.S_IRUSR | stat.S_IWUSR)
+            fh.write(content)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def prune_dir(directory: Path, keep: int) -> None:

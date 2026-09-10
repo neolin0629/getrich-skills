@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+from math import log1p
 from pathlib import Path
 
 from fusion import Merged
@@ -204,21 +205,313 @@ def _allocate(count: int, budget: int) -> list[int]:
     return shares
 
 
-def _fit_body(body: str, share: int, indent: str = "    ") -> list[str]:
+_QUERY_STOP = set("a an and are as at be by for from how in is it of on or the to what when which with 最新 当前 今天 本次 检索 请问 什么 如何 哪些 是否 分别 多少 以及 请根据 请依据".split())
+_EXCERPT_GAP = "[…中间内容省略…]"
+_TABLE_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+_SETEXT_UNDERLINE = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
+_THEMATIC_BREAK = re.compile(r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
+
+
+def _heading_level(unit: str) -> int:
+    """识别已有标题层级；不把列表、引用或代码中的下划线当作章节。"""
+    atx = re.match(r"^ {0,3}(#{1,6})(?:\s|$)", unit)
+    if atx:
+        return len(atx.group(1))
+    lines = unit.splitlines()
+    underline = _SETEXT_UNDERLINE.fullmatch(lines[-1]) if len(lines) > 1 else None
+    if underline and all(line.strip() and not re.match(
+            r"^(?: {4}|\t| {0,3}(?:[>#|]|`{3,}|~{3,}|[-*+]\s|\d+[.)]\s))", line)
+            and not _THEMATIC_BREAK.fullmatch(line)
+            and not _TABLE_SEPARATOR.fullmatch(line) for line in lines[:-1]):
+        return 1 if underline.group(1).startswith("=") else 2
+    return 0
+
+
+def _query_terms(query: str) -> set[str]:
+    """只用用户查询选段，不把站点权威度或搜索源当作正文相关性。"""
+    query = query[:2048].casefold()
+    terms = {word for word in re.findall(r"[a-z][a-z0-9_.-]+", query)
+             if word not in _QUERY_STOP}
+    # 版本号和日期是查询中的精确约束，不能把 22.04 与 24.04 都退化为 LTS。
+    terms.update(re.findall(r"\d+(?:[.-]\d+)+", query))
+    for phrase in re.findall(r"[\u4e00-\u9fff]+", query):
+        for stop in _QUERY_STOP:
+            if re.search(r"[\u4e00-\u9fff]", stop):
+                phrase = phrase.replace(stop, " ")
+        for part in phrase.split():
+            terms.update(part[i:i + 2] for i in range(len(part) - 1))
+    return set(sorted(terms)[:64])
+
+
+def _passage_units(body: str) -> list[str]:
+    """保留代码块；表格按行选取时由调用方补上表头。"""
+    units: list[str] = []
+    paragraph: list[str] = []
+    code: list[str] = []
+    fence = ""
+    table_columns = 0
+
+    def flush() -> None:
+        if not paragraph:
+            return
+        text = "\n".join(paragraph)
+        # 长段落按句界分开，避免总是把前言当摘要。没有句界时不猜语义边界。
+        units.extend(re.split(r"(?<=[。！？])|(?<=[.!?])\s+(?=[A-Z\u4e00-\u9fff])", text)
+                     if len(text) > 600 else [text])
+        paragraph.clear()
+
+    source_lines = body.splitlines()
+    skip_until = 0
+    for line_index, line in enumerate(source_lines):
+        if line_index < skip_until:
+            continue
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if fence:
+            code.append(line)
+            if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}\s*", line):
+                units.append("\n".join(code))
+                code, fence = [], ""
+        elif marker:
+            flush()
+            fence = marker.group(1)
+            code = [line]
+        elif line.startswith(("    ", "\t")):
+            # 缩进代码作为一个整体，不能在选段时打散其控制流。
+            flush()
+            if units and units[-1].startswith(("    ", "\t")):
+                units[-1] += "\n" + line
+            else:
+                units.append(line)
+        elif not line.strip():
+            flush()
+            if units and units[-1].startswith(("    ", "\t")):
+                units[-1] += "\n"
+        elif (_SETEXT_UNDERLINE.fullmatch(line) and paragraph
+              and _heading_level("\n".join(paragraph + [line]))):
+            # Setext 标题可跨普通段落的多行，必须与下划线一起保留原文。
+            units.append("\n".join(paragraph + [line]))
+            paragraph.clear()
+            table_columns = 0
+        elif _THEMATIC_BREAK.fullmatch(line):
+            flush()
+            units.append(line)
+        elif (units and units[-1].lstrip().startswith("|")
+              and not line.lstrip().startswith(("|", "#")) and line.rstrip().endswith("|")):
+            # 上游 excerpt 有时把同一表格行折行，不能把日期与该行的版本拆开。
+            units[-1] += "\n" + line
+        elif line.lstrip().startswith(("#", "|")):
+            flush()
+            units.append(line)
+            if _TABLE_SEPARATOR.fullmatch(line):
+                table_columns = len(line.strip().strip("|").split("|"))
+            elif line.lstrip().startswith("#"):
+                table_columns = 0
+            elif (table_columns and line.count("|") < table_columns
+                  and not line.rstrip().endswith("|")):
+                # 只有有限后文确实补齐列、闭合该行，才合并折行。Markdown
+                # 允许缺列行；无法补齐时不能把后面的普通段落吞进表格。
+                continuation: list[str] = []
+                pipes, size = line.count("|"), len(line)
+                for j in range(line_index + 1, min(line_index + 17, len(source_lines))):
+                    following = source_lines[j]
+                    size += len(following) + 1
+                    if (size > 2000 or following.lstrip().startswith(("|", "#", "```", "~~~"))
+                            or following.startswith(("    ", "\t"))):
+                        break
+                    continuation.append(following)
+                    pipes += following.count("|")
+                    if pipes >= table_columns and following.rstrip().endswith("|"):
+                        units[-1] += "\n" + "\n".join(continuation)
+                        skip_until = j + 1
+                        break
+        elif re.match(r"^(?:>\s*)?(?:[-*+]\s|\d+\.\s)", line):
+            flush()
+            paragraph.append(line)
+        else:
+            paragraph.append(line)
+    flush()
+    if code:
+        # 上游本就截断的围栏不补造代码；保留原文，选取时跳过不完整块。
+        units.append("\n".join(code))
+    return [unit for unit in units if unit.strip()]
+
+
+def _relevant_body(body: str, query: str, share: int, indent: str) -> list[str] | None:
+    """在单篇已有正文内选连续上下文窗口；不跨页面拼接、不生成事实。"""
+    terms = _query_terms(query)
+    if not terms:
+        return None
+    units = _passage_units(body)
+    heading_levels = [_heading_level(unit) for unit in units]
+    normalized = [re.sub(r"(?<=\d)\.\s*\n\s*(?=\d)", ".",
+                         unit.casefold().replace("\\.", ".")) for unit in units]
+    hits = [{term for term in terms if term in unit} for unit in normalized]
+    if not any(hits):
+        return None
+
+    # 章节标题和表头属于解释上下文，不能只摘数字行。
+    headings: list[int] = []
+    contexts: list[set[int]] = []
+    # 表格首列的第一个版本标识代表该行对象；升级路径等后续提及不能
+    # 代替另一版本的事实。覆盖奖励单独计数，不删除原始匹配或改写正文。
+    row_versions: list[set[str]] = []
+    table_start: int | None = None
+    for i, unit in enumerate(units):
+        first_cell = normalized[i].lstrip().removeprefix("|").split("|", 1)[0]
+        version = re.search(r"(?<![\w.])\d+(?:[.-]\d+)+(?![\w.])", first_cell)
+        row_versions.append({version.group()} if unit.lstrip().startswith("|")
+                            and version and version.group() in terms else set())
+        if heading_levels[i]:
+            level = heading_levels[i]
+            headings = [j for j in headings if heading_levels[j] < level]
+            headings.append(i)
+        context = set(headings)
+        if unit.lstrip().startswith("|"):
+            if (table_start is None or (i + 1 < len(units)
+                                       and _TABLE_SEPARATOR.fullmatch(units[i + 1]))):
+                table_start = i
+            context.add(table_start)
+            hits[i].update(hits[table_start])
+            if table_start + 1 < len(units) and _TABLE_SEPARATOR.fullmatch(units[table_start + 1]):
+                context.add(table_start + 1)
+                # 空首格的分组表头常在分隔线后还有一层真正的列名。
+                # 保留两层，避免日期行脱离 Standard / Extended 等含义。
+                if (not units[table_start].lstrip().removeprefix("|").split("|", 1)[0].strip()
+                        and table_start + 2 < len(units)
+                        and units[table_start + 2].lstrip().startswith("|")):
+                    context.add(table_start + 2)
+        else:
+            table_start = None
+        contexts.append(context)
+
+    def lines_for(indices: set[int]) -> list[str]:
+        lines: list[str] = []
+        previous = -1
+        for index in sorted(indices):
+            if index != previous + 1:
+                lines.append(indent + _EXCERPT_GAP)
+            elif lines:
+                lines.append(indent)  # 保留块间分隔，包括相邻的围栏代码
+            lines.extend(indent + line for line in units[index].splitlines())
+            previous = index
+        if indices and max(indices) < len(units) - 1:
+            lines.append(indent + _EXCERPT_GAP)
+        return lines
+
+    def cost(indices: set[int]) -> int:
+        return sum(len(line) + 1 for line in lines_for(indices))
+
+    selected: set[int] = set()
+    covered: set[str] = set()
+    covered_versions: set[str] = set()
+    # 上游长页可能有数万行；只评估最有匹配的有限候选窗口。
+    def is_label(i: int) -> bool:
+        return (bool(heading_levels[i]) or units[i].lstrip().startswith("#")
+                or bool(re.fullmatch(r"\[[^\]]+\]\([^\n]+\)", units[i].strip()))
+                or bool(_TABLE_SEPARATOR.fullmatch(units[i]))
+                or (i + 1 < len(units) and units[i].lstrip().startswith("|")
+                    and bool(_TABLE_SEPARATOR.fullmatch(units[i + 1]))))
+
+    def complete(i: int) -> bool:
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", units[i])
+        if not marker:
+            return True
+        lines = units[i].splitlines()
+        fence = marker.group(1)
+        return len(lines) > 1 and bool(re.fullmatch(
+            r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}\s*", lines[-1]))
+
+    weights = {term: log1p(len(units) / (1 + sum(term in hit for hit in hits)))
+               for term in terms}
+    candidates = sorted((i for i, hit in enumerate(hits) if hit and not is_label(i) and complete(i)),
+                        key=lambda i: (-sum(weights[t] for t in hits[i]), i))[:128]
+    for _ in range(8):
+        best: tuple[float, int, set[int]] | None = None
+        for i in candidates:
+            if i in selected:
+                continue
+            unit = units[i]
+            window = {i} | contexts[i]
+            # 相关条款的相邻说明常包含默认值、例外或日期。宁可少选主题，保留语境。
+            for j in (i - 1, i + 1):
+                if (0 <= j < len(units) and len(units[j]) <= 450 and complete(j)
+                        and not heading_levels[j] and not units[j].lstrip().startswith("#")
+                        and contexts[j].issubset(window | contexts[i])):
+                    expanded = window | {j} | contexts[j]
+                    if cost(selected | expanded) <= share:
+                        window = expanded
+            added = window - selected
+            if not added or cost(selected | window) > share:
+                continue
+            # 窗口的成本包含相邻条款，收益也应计入这些条款，避免丰富的
+            # 例外说明仅因邻段更长而输给短导航或旁支话题。
+            window_hits = set().union(*(hits[j] for j in window))
+            gain = (sum(weights[t] for t in window_hits - covered)
+                    + 0.15 * sum(weights[t] for t in window_hits))
+            window_versions = set().union(*(row_versions[j] for j in window))
+            gain += 4 * sum(weights[t] for t in window_versions - covered_versions)
+            score = gain / max(sum(len(units[j]) for j in added), 80) ** 0.35
+            if unit.lstrip().startswith("|"):
+                score *= 1.3
+            if best is None or score > best[0]:
+                best = (score, i, window)
+        if best is None:
+            break
+        selected.update(best[2])
+        covered.update(*(hits[j] for j in best[2]))
+        covered_versions.update(*(row_versions[j] for j in best[2]))
+    return lines_for(selected) if selected else None
+
+
+def _fit_body(body: str, share: int, indent: str = "    ", query: str = "") -> list[str]:
     """把正文塞进 share 个字符（含每行缩进开销），返回已缩进的行。
 
     关键：装不下的那一行要**再截短**，绝不整行丢弃。
     Parallel 的 excerpt 和豆包的 Summary 经常是一整段不带换行的长文本，
     整行丢弃等于把一条结果里最有价值的内容删光（正文直接消失，只剩标题和 URL）。
     """
-    lines = [ln for ln in defang(body).splitlines() if ln.strip()]
+    body = defang(body)
+    if query and sum(len(line) + len(indent) + 1 for line in body.splitlines()) > share:
+        relevant = _relevant_body(body, query, share, indent)
+        if relevant:
+            return relevant
+    lines = body.splitlines()
     out: list[str] = []
     used = 0
-    for line in lines:
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if marker or line.startswith(("    ", "\t")):
+            # 不输出半个代码块，空白与缩进也属于代码本身。
+            end = index + 1
+            complete = not marker
+            while end < len(lines):
+                if marker:
+                    fence = marker.group(1)
+                    if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}\s*", lines[end]):
+                        end += 1
+                        complete = True
+                        break
+                elif lines[end].strip() and not lines[end].startswith(("    ", "\t")):
+                    break
+                end += 1
+            block = lines[index:end]
+            cost = sum(len(indent) + len(ln) + 1 for ln in block)
+            if not complete or used + cost > share:
+                note = indent + "[…代码块未完整展开…]"
+                if used + len(note) + 1 <= share:
+                    out.append(note)
+                break
+            out.extend(indent + ln for ln in block)
+            used += cost
+            index = end
+            continue
         cost = len(indent) + len(line) + 1
         if used + cost <= share:
             out.append(indent + line)
             used += cost
+            index += 1
             continue
         room = share - used - len(indent) - 1
         if room >= _MIN_BODY_TAIL:
@@ -254,7 +547,7 @@ def _meta_line(index: int, item: Merged, budget: int = _META_LINE_CAP) -> str:
     return " · ".join(bits)
 
 
-def render_results(items: list[Merged], budget: int, dumped: bool = True) -> tuple[str, int]:
+def render_results(items: list[Merged], budget: int, dumped: bool = True, query: str = "") -> tuple[str, int]:
     """渲染网页结果，返回 (文本, 带正文的条数)。
 
     预算是硬上限，按「剩余字符」逐条渲染：
@@ -307,6 +600,30 @@ def render_results(items: list[Merged], budget: int, dumped: bool = True) -> tup
     # _allocate 在预算为 0 时返回空列表；补齐成全 0，否则 zip 会把所有结果一起吃掉
     shares = _allocate(shown, body_budget)
     shares += [0] * (shown - len(shares))
+    fitted: dict[int, list[str]] = {}
+    if query and _query_terms(query) and shown:
+        # 给已展示的候选留一份正文额度，防止尾部相关条款永远只有链接。
+        available = max(body_budget - 2 * shown - notice_reserve, 0)
+        floor = min(450, available // (shown * 2))
+        extra = _allocate(shown, max(available - floor * shown, 0))
+        extra += [0] * (shown - len(extra))
+        shares = [min(_MAX_BODY, floor + amount) for amount in extra]
+        # 短摘要和完整段落留下的额度回流，避免有预算却读不到后面的完整表格。
+        for _ in range(3):
+            fitted = {i: _fit_body(items[i].body, shares[i], query=query)
+                      if shares[i] > 0 else [] for i in range(shown)}
+            used = [sum(len(line) + 1 for line in fitted[i]) for i in range(shown)]
+            pending = [i for i in range(shown) if shares[i] < _MAX_BODY
+                       and len(items[i].body) > used[i]]
+            spare = max(available - sum(used), 0)
+            if not pending or spare < len(pending) * 40:
+                break
+            bump = spare // len(pending)
+            # 本轮已渲染内容也占预算；只给尚未完整展开的页面增量。
+            shares = [min(_MAX_BODY, used[i] + bump) if i in pending else shares[i]
+                      for i in range(shown)]
+        fitted = {i: _fit_body(items[i].body, shares[i], query=query)
+                  if shares[i] > 0 else [] for i in range(shown)}
 
     blocks: list[str] = []
     detailed = 0
@@ -317,8 +634,8 @@ def render_results(items: list[Merged], budget: int, dumped: bool = True) -> tup
         lines = [meta]
         if url:
             lines.append(f"    {url}")
-        if share >= _MIN_BODY and item.body:
-            body_lines = _fit_body(item.body, share)
+        if (share >= _MIN_BODY or position in fitted) and item.body:
+            body_lines = fitted[position] if position in fitted else _fit_body(item.body, share, query=query)
             if body_lines:
                 lines += body_lines
                 detailed += 1
@@ -451,6 +768,7 @@ def _assemble(
     elapsed: float,
     dump_path: str | None,
     image_mode: bool = False,
+    selection_query: str | None = None,
 ) -> tuple[list[str], int, int | None]:
     """组装输出，返回 (分段列表, 超出预算的字符数, 正文分段的下标)。
 
@@ -525,7 +843,8 @@ def _assemble(
         # 扣的是整个来源块的开销，不只是那行内容：前导空行 + "来源: " 前缀 + 换行。
         # 只扣内容长度会让输出稳定超出 budget 几个字符。
         sources_cost = len(sources_line) + len("来源: ") + 2 if sources_line else 0
-        body, _ = render_results(items, max(remaining - sources_cost, 0), dumped)
+        body, _ = render_results(items, max(remaining - sources_cost, 0), dumped,
+                                 query=selection_query if selection_query is not None else query)
         body_slot = len(inner)
         inner.append(body)
         if sources_line:

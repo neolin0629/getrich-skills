@@ -4,14 +4,13 @@
 
 两级去重：
 1. URL 归一化后完全相同 → 直接合并
-2. 正文字符 3-gram 的 Jaccard 相似度 ≥ 阈值 → 合并
+2. 同标题且完整正文严格相同 → 合并，并保留全部 URL
 
-用字符 3-gram 而不是分词，是因为它对中英文都成立且不需要额外依赖；
-候选规模只有几十篇，O(n²) 比较在纯 Python 下也只有毫秒级，不值得引入 SimHash。
+不同 URL 的近似正文分别保留，避免否定词、条件和代码差异被相似度淹没。
 
 排序用 RRF（Reciprocal Rank Fusion）：两个源的分数不可比
 （Custom 有 0~1 的 RankScore，Global 和 Parallel 只有名次），
-只有名次是共同语言，所以以名次为主、分数只作小幅加成。
+只有名次是共同语言；相关度和权威等级仅展示，不直接跨源加分。
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ _TRACKING_EXACT = {
     "share_source", "share_medium", "share_token", "shareid",
 }
 _HOST_PREFIXES = ("www.", "m.", "mobile.", "wap.", "amp.")
-_PUNCT = re.compile(r"[\s　-〿＀-￯!-/:-@\[-`{-~]+")
 # 日级时效词：问"今天最高气温"时，去年的同题报道是干扰项而不是补充
 _FRESH_STRONG = ("今天", "今日", "现在", "实时", "刚刚", "当前")
 # 强时效词必须是弱时效词的子集，否则会出现 is_strong_fresh_query 为真、
@@ -117,19 +115,12 @@ def canonical_url(url: str) -> str:
     return urlunsplit(("", host, path, urlencode(sorted(kept)), ""))
 
 
-def _shingles(text: str, size: int = 3) -> set[str]:
-    """字符 n-gram 集合，用于近重复判断。"""
-    normalized = _PUNCT.sub("", (text or "")[:1500]).lower()
-    if len(normalized) < size:
-        return {normalized} if normalized else set()
-    return {normalized[i: i + size] for i in range(len(normalized) - size + 1)}
-
-
-def _jaccard(left: set[str], right: set[str]) -> float:
-    if not left or not right:
-        return 0.0
-    intersection = len(left & right)
-    return intersection / (len(left) + len(right) - intersection)
+def _equivalent_key(item: Merged) -> tuple[str, str] | None:
+    """仅合并同标题的完整相同正文；否定、标点、大小写和代码空白均有意义。"""
+    title, body = (item.title or "").strip(), item.body or ""
+    if len(title) < 8 or len(body) < 120:
+        return None
+    return title, body
 
 
 @dataclass
@@ -150,24 +141,14 @@ class Merged:
     score: float = 0.0
 
     def absorb(self, doc: Doc) -> None:
-        """并入另一个源的同一篇文档，逐字段取更优的那个。"""
-        self.sources.setdefault(doc.source, doc.rank)
-        if doc.url and doc.url != self.url and doc.url not in self.also_urls:
-            self.also_urls.append(doc.url)
+        """选择正文更完整的一份作为代表，引用字段随代表一起切换。"""
+        self.sources[doc.source] = min(self.sources.get(doc.source, doc.rank), doc.rank)
+        urls = [self.url, *self.also_urls, doc.url]
         if len(doc.body or "") > len(self.body or ""):
-            self.body = doc.body
-        if len(doc.title or "") > len(self.title or ""):
-            self.title = doc.title
-        if not self.site and doc.site:
-            self.site = doc.site
-        if not self.publish and doc.publish:
-            self.publish = doc.publish
-        if doc.authority is not None and (self.authority is None or doc.authority < self.authority):
-            self.authority = doc.authority
-        if doc.rank_score is not None and (self.rank_score is None or doc.rank_score > self.rank_score):
-            self.rank_score = doc.rank_score
-        if doc.extra.get("ruyi") and not self.ruyi:
-            self.ruyi = doc.extra["ruyi"]
+            representative = _from_doc(doc)
+            for name in ("url", "title", "body", "site", "publish", "authority", "rank_score", "ruyi"):
+                setattr(self, name, getattr(representative, name))
+        self.also_urls = list(dict.fromkeys(u for u in urls if u and u != self.url))
         for image in doc.images:
             if image not in self.images:
                 self.images.append(image)
@@ -197,10 +178,12 @@ def _from_doc(doc: Doc) -> Merged:
 
 
 def merge(docs: list[Doc], threshold: float = 0.75) -> list[Merged]:
-    """两级去重。输入按源顺序给出，豆包在前，同分时豆包的版本胜出。"""
-    merged: list[Merged] = []
+    """先按 URL 选择完整代表，再跨 URL 合并严格相同正文。
+
+    threshold 保留调用兼容性，不再允许相似度阈值丢弃非等价正文。
+    """
+    url_groups: list[Merged] = []
     by_url: dict[str, Merged] = {}
-    shingle_cache: list[set[str]] = []
 
     for doc in docs:
         if not (doc.url or doc.title):
@@ -209,27 +192,30 @@ def merge(docs: list[Doc], threshold: float = 0.75) -> list[Merged]:
         if key and key in by_url:
             by_url[key].absorb(doc)
             continue
-
-        # 同名年报等独立文档很常见；标题相同不能替代正文一致性的证据。
-        hit: Merged | None = None
-        signature = _shingles(doc.body)
-        if signature:
-            for existing, existing_sig in zip(merged, shingle_cache):
-                if _jaccard(signature, existing_sig) >= threshold:
-                    hit = existing
-                    break
-
-        if hit is not None:
-            hit.absorb(doc)
-            if key:
-                by_url.setdefault(key, hit)
-            continue
-
         entry = _from_doc(doc)
-        merged.append(entry)
-        shingle_cache.append(signature)
+        url_groups.append(entry)
         if key:
             by_url[key] = entry
+
+    # 必须在 URL 代表不再变化后判断等价，避免后来更长的同 URL 摘要
+    # 覆盖先前跨 URL 合并进来的不同正文。哈希索引同时避免两两正文比较。
+    merged: list[Merged] = []
+    by_content: dict[tuple[str, str], Merged] = {}
+    for entry in url_groups:
+        content_key = _equivalent_key(entry)
+        hit = by_content.get(content_key) if content_key is not None else None
+        if hit is None:
+            merged.append(entry)
+            if content_key is not None:
+                by_content[content_key] = entry
+            continue
+        for source, rank in entry.sources.items():
+            hit.sources[source] = min(hit.sources.get(source, rank), rank)
+        hit.also_urls = list(dict.fromkeys(
+            url for url in [*hit.also_urls, entry.url, *entry.also_urls] if url and url != hit.url))
+        for image in entry.images:
+            if image not in hit.images:
+                hit.images.append(image)
     return merged
 
 
@@ -325,15 +311,19 @@ def _recency_bonus(publish: str | None, strong: bool = False) -> float:
         return 0.0
     import datetime
 
+    if not isinstance(publish, str):
+        return 0.0
     text = publish.strip()
     today = datetime.date.today()
     full = re.match(r"(\d{4})-(\d{2})-(\d{2})", text)
-    if full and strong:
+    if full:
         try:
             days = (today - datetime.date(*(int(g) for g in full.groups()))).days
         except ValueError:
-            days = None
-        if days is not None:
+            return 0.0
+        if days < -1:
+            return 0.0
+        if strong:
             if days <= 2:
                 return 0.20
             if days <= 14:
@@ -344,10 +334,12 @@ def _recency_bonus(publish: str | None, strong: bool = False) -> float:
                 return -0.10
             return -0.20
 
-    match = re.match(r"(\d{4})", text)
+    match = full or re.fullmatch(r"(\d{4})", text)
     if not match:
         return 0.0
     age = today.year - int(match.group(1))
+    if age < 0:
+        return 0.0
     if age <= 0:
         return 0.12
     if age == 1:
@@ -361,7 +353,7 @@ def rank(merged: list[Merged], cfg: dict, fresh: bool = False, strong_fresh: boo
     k = float(conf.get("rrf_k", 60))
     weights = {
         "doubao": float(conf.get("weight_doubao", 1.0)),
-        "parallel": float(conf.get("weight_parallel", 0.7)),
+        "parallel": float(conf.get("weight_parallel", 1.0)),
     }
 
     for item in merged:
@@ -369,15 +361,9 @@ def rank(merged: list[Merged], cfg: dict, fresh: bool = False, strong_fresh: boo
             weights.get(source, 0.5) / (k + position)
             for source, position in item.sources.items()
         )
-        if len(item.sources) >= 2:
-            score += 0.15  # 跨源互证：两个独立检索系统都召回，是很强的质量信号
-        if item.ruyi:
-            score += 0.25  # 火山如意是官方结构化直答，值得置顶
-        if item.rank_score is not None:
-            score += 0.10 * float(item.rank_score)
-        score += {1: 0.08, 2: 0.04}.get(item.authority or 0, 0.0)
         if fresh:
-            score += _recency_bonus(item.publish, strong=strong_fresh)
+            score *= 1 + _recency_bonus(item.publish, strong=strong_fresh)
         item.score = score
 
-    return sorted(merged, key=lambda d: d.score, reverse=True)
+    # 卡片是独立直答类型；普通网页用 RRF，稳定键不依赖源完成顺序。
+    return sorted(merged, key=lambda d: (not bool(d.ruyi), -d.score, canonical_url(d.url), d.title))
