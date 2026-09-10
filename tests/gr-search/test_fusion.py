@@ -141,17 +141,77 @@ def test_merge_records_alternate_url():
     assert merged[0].also_urls
 
 
-def test_reposts_with_similar_content_still_merge():
-    """取消标题直通后，同一篇文章的转载仍按正文合并，并保留另一条来源链接。"""
+def test_reposts_with_identical_content_still_merge():
+    """标题和正文完全相同的转载可合并，保留另一条来源链接。"""
     title = "国务院发布关于进一步优化营商环境的若干意见"
-    body = "持续优化营商环境，完善市场准入制度，保护各类经营主体的合法权益。" * 20
+    body = ("持续优化营商环境，完善市场准入制度，保护各类经营主体的合法权益。"
+            "各地建立统一登记窗口，缩短审批流程，公开办理时限，接受社会监督。"
+            "政策同时覆盖市场竞争、行政执法和公共服务，明确有关部门责任分工。"
+            "企业可通过线上平台提交申请、查询进度并反馈办理问题。"
+            "各部门应加强协调配合，定期检查执行情况，及时回应经营主体诉求。")
     merged = fusion.merge([
         mkdoc("https://a.com/1", title=title, body=body),
-        mkdoc("https://b.com/2", title=title, body=body + "编辑：乙站", source="parallel"),
+        mkdoc("https://b.com/2", title=title, body=body, source="parallel"),
     ])
     assert len(merged) == 1
     assert merged[0].sources == {"doubao": 1, "parallel": 1}
+    assert merged[0].url == "https://a.com/1"
     assert merged[0].also_urls == ["https://b.com/2"]
+
+
+@pytest.mark.parametrize('clauses', [
+    ('DDL statements automatically commit the transaction.',
+     'DDL statements do not automatically commit the transaction.'),
+    ('允许在事务中调用。', '不允许在事务中调用。'),
+    ('Allowed when enabled.', 'Allowed unless enabled.'),
+    ('Valid through 2027-04-30.', 'Valid through 2028-04-30.'),
+    ('value <= limit', 'value < limit'),
+    ('Return None.', 'Return none.'),
+    ('编辑：甲站', '编辑：乙站'),
+    ('```python\nif ready:\n    commit()\n    close()\n```',
+     '```python\nif ready:\n    commit()\nclose()\n```'),
+])
+def test_near_identical_cross_url_rules_preserve_each_body(clauses):
+    prefix = 'This reference describes transaction behavior and configuration options. ' * 80
+    # 差异放在长正文中间：不能依赖前缀、后缀或取样签名判断等价。
+    docs = [mkdoc('https://example.com/v1', title='Transaction behavior reference',
+                  body=prefix + clauses[0] + prefix),
+            mkdoc('https://example.com/v2', title='Transaction behavior reference',
+                  body=prefix + clauses[1] + prefix, source='parallel')]
+    for threshold in (0, .75, .9, 1):
+        result = fusion.merge(docs, threshold=threshold)
+        assert [(d.url, d.body, d.sources) for d in result] == [
+            (d.url, d.body, {d.source: d.rank}) for d in docs]
+
+
+@pytest.mark.parametrize('order', [(0, 1, 2), (0, 2, 1), (2, 1, 0)])
+def test_later_url_representative_does_not_erase_another_urls_rules(order):
+    body = 'This reference describes transaction behavior and configuration options. ' * 5
+    docs = [mkdoc('https://a.example/v1', title='Transaction behavior reference', body=body),
+            mkdoc('https://b.example/v2', title='Transaction behavior reference', body=body),
+            mkdoc('https://b.example/v2', title='Transaction behavior reference',
+                  body=body + 'DDL does not commit.', source='parallel')]
+    result = fusion.merge([docs[i] for i in order])
+    assert {d.url: d.body for d in result} == {docs[0].url: body, docs[1].url: docs[2].body}
+    assert next(d for d in result if d.url == docs[0].url).sources == {'doubao': 1}
+    assert next(d for d in result if d.url == docs[1].url).sources == {'doubao': 1, 'parallel': 1}
+
+
+def test_equivalent_url_groups_keep_all_source_ranks_aliases_and_images():
+    body = 'This reference describes transaction behavior and configuration options. ' * 5
+    docs = [mkdoc('https://a.example/v1?utm_source=x', title='Transaction reference', body=body,
+                  source='doubao', rank=3),
+            mkdoc('https://a.example/v1', title='Transaction reference', body=body,
+                  source='parallel', rank=4),
+            mkdoc('https://b.example/v1?utm_source=x', title='Transaction reference', body=body,
+                  source='doubao', rank=2),
+            mkdoc('https://b.example/v1', title='Transaction reference', body=body,
+                  source='parallel', rank=1)]
+    docs[3].images = [{'url': 'https://b.example/figure.png'}]
+    result, = fusion.merge(docs)
+    assert result.sources == {'doubao': 2, 'parallel': 1}
+    assert {result.url, *result.also_urls} == {d.url for d in docs}
+    assert result.images == docs[3].images
 
 
 @pytest.mark.parametrize("bodies", [
@@ -199,13 +259,13 @@ def test_short_generic_titles_do_not_merge():
     assert len(merged) == 2
 
 
-def test_near_duplicate_body_merges():
-    body = "这是一段足够长的正文，用来触发 3-gram 相似度判定。" * 10
+def test_repeated_template_with_unrelated_titles_stays_separate():
+    body = "这是多篇文章共用的页面模板，不能仅凭模板相同判断为同一文档。" * 10
     merged = fusion.merge([
         mkdoc("https://a.com/1", title="甲标题", body=body),
         mkdoc("https://b.com/2", title="乙标题", body=body + "尾部略有不同"),
     ])
-    assert len(merged) == 1
+    assert len(merged) == 2
 
 
 def test_docs_without_url_or_title_are_dropped():
@@ -267,11 +327,10 @@ def test_malformed_publish_date_does_not_crash(publish):
     assert isinstance(bonus, float) and -1.0 <= bonus <= 1.0
 
 
-def test_bad_month_day_falls_back_to_year_granularity():
-    """月日不合法时退回年级判定，而不是整个丢弃——年份本身仍然是有效信息。
-    「昨天」这种连年份都没有的才真正返回 0。"""
-    assert fusion._recency_bonus("2026-13-45", strong=True) == fusion._recency_bonus("2026", strong=True)
-    assert fusion._recency_bonus("昨天", strong=True) == 0.0
+def test_bad_month_day_is_unknown_date():
+    """完整日期非法时不能退回年份并奖励。"""
+    assert fusion._recency_bonus("2026-13-45", strong=True) == 0
+
 
 
 # ---------------------------------------------------------------- 显式日期区间的时效判定

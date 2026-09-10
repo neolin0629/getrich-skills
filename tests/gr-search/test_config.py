@@ -182,12 +182,12 @@ def test_resolve_budget_precedence():
     pytest.param('{"parallel": {"max_results": "bad"}}', "parallel", "max_results", 10, id="max_results非数字"),
     pytest.param('{"parallel": {"excerpt_max_chars_total": "x"}}', "parallel",
                  "excerpt_max_chars_total", 24000, id="excerpt非数字"),
-    pytest.param('{"fusion": {"dedup_jaccard": "oops"}}', "fusion", "dedup_jaccard", 0.75, id="阈值非数字"),
-    pytest.param('{"fusion": {"dedup_jaccard": 1.5}}', "fusion", "dedup_jaccard", 0.75, id="阈值越界"),
+    pytest.param('{"fusion": {"dedup_jaccard": "oops"}}', "fusion", "dedup_jaccard", 0.9, id="阈值非数字"),
+    pytest.param('{"fusion": {"dedup_jaccard": 1.5}}', "fusion", "dedup_jaccard", 0.9, id="阈值越界"),
     pytest.param('{"fusion": {"rrf_k": -1}}', "fusion", "rrf_k", 60, id="rrf_k负数除零"),
     pytest.param('{"fusion": {"rrf_k": 0}}', "fusion", "rrf_k", 60, id="rrf_k=0除零"),
     pytest.param('{"fusion": {"weight_doubao": "x"}}', "fusion", "weight_doubao", 1.0, id="权重非数字"),
-    pytest.param('{"fusion": {"weight_parallel": Infinity}}', "fusion", "weight_parallel", 0.7, id="权重无穷"),
+    pytest.param('{"fusion": {"weight_parallel": Infinity}}', "fusion", "weight_parallel", 1.0, id="权重无穷"),
     pytest.param('{"output": {"profile": "huge"}}', "output", "profile", "standard", id="profile未知"),
     pytest.param('{"cache": {"dir": 5}}', "cache", "dir", None, id="缓存目录非字符串"),
     # 回退目标是**真正的默认值 None**，不是 15000——回退成具体数字等于凭空造出
@@ -274,7 +274,7 @@ DEFAULTS_BOOL = {
 
 def test_top_level_bool_normalized(load_config_from):
     cfg, err = load_config_from('{"card_shortcircuit": "false"}')
-    assert cfg["card_shortcircuit"] is True
+    assert cfg["card_shortcircuit"] is False
     assert "⚠" in err
 
 

@@ -1,0 +1,610 @@
+[
+  {
+    "id": "C1",
+    "category": "中文资料",
+    "question": "豆包搜索 Custom 版中，Query 长度限制是什么？NeedUrl=true 会如何影响如意卡片？",
+    "q": "豆包搜索Custom版 Query NeedUrl",
+    "objective": "查找火山引擎豆包搜索Custom版官方参数定义：Query字符上限及NeedUrl=true对如意卡片的影响",
+    "pq": [
+      "豆包搜索 Custom Query NeedUrl 如意卡片"
+    ],
+    "checks": [
+      "Query长度上下限",
+      "NeedUrl含义",
+      "如意结果被过滤"
+    ],
+    "reference_urls": [
+      "https://www.volcengine.com/docs/87772/2272953"
+    ]
+  },
+  {
+    "id": "C2",
+    "category": "中文资料",
+    "question": "微信小程序 wx.request 的默认超时时间、最大并发数是什么？生产环境请求域名有哪些关键限制？",
+    "q": "微信小程序wx.request 超时并发域名",
+    "objective": "Find official WeChat Mini Program wx.request default timeout maximum concurrent requests and production request domain HTTPS restrictions",
+    "pq": [
+      "微信小程序 wx.request 默认超时 最大并发 服务器域名"
+    ],
+    "checks": [
+      "默认超时",
+      "request最大并发",
+      "HTTPS和域名白名单",
+      "开发调试例外不等于生产放开"
+    ],
+    "reference_urls": [
+      "https://developers.weixin.qq.com/miniprogram/dev/api/network/request/wx.request.html",
+      "https://developers.weixin.qq.com/miniprogram/dev/framework/ability/network.html"
+    ]
+  },
+  {
+    "id": "C3",
+    "category": "中文资料",
+    "question": "微信小程序 wx.setStorageSync 支持存储哪些类型的数据？单个 key 和同一用户同一小程序的总容量限制分别是什么？",
+    "q": "微信小程序 wx.setStorageSync 数据类型 单个key 总容量",
+    "objective": "查找官方资料回答：微信小程序 wx.setStorageSync 支持存储哪些类型的数据？单个 key 和同一用户同一小程序的总容量限制分别是什么？",
+    "pq": [
+      "微信小程序 wx.setStorageSync 数据类型 单个key 总容量"
+    ],
+    "checks": [
+      "可存储类型及序列化要求",
+      "单个key容量限制",
+      "同一用户同一小程序总容量限制"
+    ],
+    "reference_urls": [
+      "https://developers.weixin.qq.com/miniprogram/dev/api/storage/wx.setStorageSync.html"
+    ]
+  },
+  {
+    "id": "C4",
+    "category": "中文资料",
+    "question": "Vue 3 的 watch 默认在所属组件 DOM 更新前还是更新后执行？需要读取更新后的 DOM 时如何配置？flush: sync 的批处理有什么例外？",
+    "q": "Vue watch flush post sync DOM 更新 批处理",
+    "objective": "查找官方资料回答：Vue 3 的 watch 默认在所属组件 DOM 更新前还是更新后执行？需要读取更新后的 DOM 时如何配置？flush: sync 的批处理有什么例外？",
+    "pq": [
+      "Vue watch flush post sync DOM 更新 批处理"
+    ],
+    "checks": [
+      "默认回调与所属组件DOM更新顺序",
+      "flush post的用途和写法",
+      "sync不批处理及相应限制"
+    ],
+    "reference_urls": [
+      "https://cn.vuejs.org/guide/essentials/watchers.html"
+    ]
+  },
+  {
+    "id": "C5",
+    "category": "中文资料",
+    "question": "Vue 3 中，父组件修改 props 后子组件如何更新？为什么不应在子组件直接修改 prop，而对象或数组的嵌套属性又有什么区别？",
+    "q": "Vue props 单向数据流 对象 数组 嵌套属性 修改",
+    "objective": "查找官方资料回答：Vue 3 中，父组件修改 props 后子组件如何更新？为什么不应在子组件直接修改 prop，而对象或数组的嵌套属性又有什么区别？",
+    "pq": [
+      "Vue props 单向数据流 对象 数组 嵌套属性 修改"
+    ],
+    "checks": [
+      "props更新方向",
+      "直接修改prop的限制",
+      "对象数组嵌套属性例外及建议"
+    ],
+    "reference_urls": [
+      "https://cn.vuejs.org/guide/components/props.html"
+    ]
+  },
+  {
+    "id": "C6",
+    "category": "中文资料",
+    "question": "Element Plus 的 DatePicker 中，format 和 value-format 分别控制什么？不设置 value-format 时绑定值是什么类型，使用自定义日期格式时有什么大小写要求？",
+    "q": "Element Plus DatePicker format value-format Date 大小写",
+    "objective": "查找 Element Plus 中文官方 DatePicker 文档，解释显示格式和绑定值格式区别、默认绑定值类型及日期格式大小写规则",
+    "pq": [
+      "Element Plus DatePicker format value-format Date 大小写"
+    ],
+    "checks": [
+      "format显示格式作用",
+      "value-format绑定值格式作用",
+      "默认绑定值类型",
+      "格式标记大小写要求"
+    ],
+    "reference_urls": [
+      "https://element-plus.org/zh-CN/component/date-picker.html"
+    ]
+  },
+  {
+    "id": "C7",
+    "category": "中文资料",
+    "question": "Vue 3 中 ref 作为 reactive 对象属性时会自动解包吗？它作为响应式数组元素或 Map 值时有什么不同？将新 ref 赋给原对象属性后，旧 ref 会怎样？",
+    "q": "Vue reactive ref 自动解包 数组 Map 新 ref 替换",
+    "objective": "查找 Vue 中文官方响应式基础文档，说明 ref 作为对象属性、数组元素和 Map 值的解包规则，以及新 ref 替换属性后旧 ref 的连接关系",
+    "pq": [
+      "Vue reactive ref 自动解包 数组 Map 新 ref 替换"
+    ],
+    "checks": [
+      "reactive对象属性解包",
+      "响应式数组元素例外",
+      "Map值例外",
+      "赋新ref与旧ref连接关系"
+    ],
+    "reference_urls": [
+      "https://cn.vuejs.org/guide/essentials/reactivity-fundamentals.html"
+    ]
+  },
+  {
+    "id": "C8",
+    "category": "中文资料",
+    "question": "微信小程序 wx.login 获取的 code 有什么用途、有效期多久、是否可以重复使用？code 和用户的 openid 是否是同一个东西？",
+    "q": "微信小程序 wx.login code 有效期 一次性 openid",
+    "objective": "查找官方资料回答：微信小程序 wx.login 获取的 code 有什么用途、有效期多久、是否可以重复使用？code 和用户的 openid 是否是同一个东西？",
+    "pq": [
+      "微信小程序 wx.login code 有效期 一次性 openid"
+    ],
+    "checks": [
+      "code用途和兑换位置",
+      "有效期",
+      "一次性限制",
+      "code与openid区别"
+    ],
+    "reference_urls": [
+      "https://developers.weixin.qq.com/miniprogram/dev/api/open-api/login/wx.login.html",
+      "https://developers.weixin.qq.com/miniprogram/dev/framework/open-ability/login.html"
+    ]
+  },
+  {
+    "id": "E1",
+    "category": "英文文档",
+    "question": "Python asyncio.TaskGroup 中，一个子任务抛出非 CancelledError 异常时，其他任务及退出上下文会怎样？KeyboardInterrupt 有什么例外？",
+    "q": "Python TaskGroup exception cancellation",
+    "objective": "Find official Python asyncio TaskGroup first non-CancelledError sibling cancellation context exit ExceptionGroup KeyboardInterrupt semantics",
+    "pq": [
+      "asyncio TaskGroup first exception ExceptionGroup KeyboardInterrupt"
+    ],
+    "checks": [
+      "取消其他任务",
+      "等待所有任务结束",
+      "ExceptionGroup或BaseExceptionGroup",
+      "KeyboardInterrupt原样重新抛出"
+    ],
+    "reference_urls": [
+      "https://docs.python.org/3/library/asyncio-task.html"
+    ]
+  },
+  {
+    "id": "E2",
+    "category": "英文文档",
+    "question": "GitHub Actions 使用同一 concurrency group 时，运行中和等待中的任务分别最多几个？新任务如何影响旧 pending 任务？cancel-in-progress 和执行顺序有什么约束？",
+    "q": "GitHub Actions concurrency pending order",
+    "objective": "Find current official GitHub Actions concurrency running and pending limits, replacement, cancel-in-progress constraints and ordering semantics",
+    "pq": [
+      "GitHub Actions concurrency pending replaced cancel-in-progress ordering"
+    ],
+    "checks": [
+      "running和pending容量",
+      "新pending替换旧pending",
+      "cancel-in-progress取消运行中任务",
+      "执行顺序及其时间基准；区分默认和可选队列配置"
+    ],
+    "reference_urls": [
+      "https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency"
+    ]
+  },
+  {
+    "id": "E3",
+    "category": "英文文档",
+    "question": "Python asyncio.gather 默认模式下一个任务抛异常时，其他任务会自动取消吗？如果取消的是 gather 本身，或者设置 return_exceptions=True，行为分别怎样？",
+    "q": "Python asyncio gather exception cancellation return_exceptions",
+    "objective": "查找官方资料回答：Python asyncio.gather 默认模式下一个任务抛异常时，其他任务会自动取消吗？如果取消的是 gather 本身，或者设置 return_exceptions=True，行为分别怎样？",
+    "pq": [
+      "Python asyncio gather exception cancellation return_exceptions"
+    ],
+    "checks": [
+      "默认首次异常传播",
+      "其他任务是否自动取消",
+      "取消gather时子任务行为",
+      "return_exceptions行为"
+    ],
+    "reference_urls": [
+      "https://docs.python.org/3/library/asyncio-task.html"
+    ]
+  },
+  {
+    "id": "E4",
+    "category": "英文文档",
+    "question": "PostgreSQL 的 Read Committed 隔离级别下，同一事务中连续两个 SELECT 是否总看到相同数据？并发 UPDATE 命中同一行时会怎样处理和重新检查 WHERE？",
+    "q": "PostgreSQL Read Committed SELECT UPDATE re-evaluate WHERE",
+    "objective": "查找官方资料回答：PostgreSQL 的 Read Committed 隔离级别下，同一事务中连续两个 SELECT 是否总看到相同数据？并发 UPDATE 命中同一行时会怎样处理和重新检查 WHERE？",
+    "pq": [
+      "PostgreSQL Read Committed SELECT UPDATE re-evaluate WHERE"
+    ],
+    "checks": [
+      "每条语句快照",
+      "同事务两次SELECT可能不同",
+      "并发更新等待行为",
+      "更新后重新检查WHERE"
+    ],
+    "reference_urls": [
+      "https://www.postgresql.org/docs/current/transaction-iso.html"
+    ]
+  },
+  {
+    "id": "E5",
+    "category": "英文文档",
+    "question": "HTTP 304 响应是否含有消息内容？If-None-Match 在 GET/HEAD 与其他方法中的条件失败响应有何区别？",
+    "q": "RFC 9110 304 If-None-Match GET HEAD other methods",
+    "objective": "查找官方资料回答：HTTP 304 响应是否含有消息内容？If-None-Match 在 GET/HEAD 与其他方法中的条件失败响应有何区别？",
+    "pq": [
+      "RFC 9110 304 If-None-Match GET HEAD other methods"
+    ],
+    "checks": [
+      "304内容限制",
+      "GET HEAD条件命中响应",
+      "其他方法条件命中响应",
+      "区分条件匹配与操作是否执行"
+    ],
+    "reference_urls": [
+      "https://www.rfc-editor.org/rfc/rfc9110.html#section-13.1.2",
+      "https://www.rfc-editor.org/rfc/rfc9110.html#section-15.4.5"
+    ]
+  },
+  {
+    "id": "E6",
+    "category": "英文文档",
+    "question": "SQLite 默认开启外键约束吗？应用应如何为连接显式启用；在多语句事务进行中切换 PRAGMA foreign_keys 有什么限制？",
+    "q": "SQLite foreign key default PRAGMA foreign_keys transaction no-op",
+    "objective": "查找官方资料回答：SQLite 默认开启外键约束吗？应用应如何为连接显式启用；在多语句事务进行中切换 PRAGMA foreign_keys 有什么限制？",
+    "pq": [
+      "SQLite foreign key default PRAGMA foreign_keys transaction no-op"
+    ],
+    "checks": [
+      "默认值与编译选项 caveat",
+      "每连接启用方法",
+      "事务中切换限制"
+    ],
+    "reference_urls": [
+      "https://www.sqlite.org/foreignkeys.html"
+    ]
+  },
+  {
+    "id": "E7",
+    "category": "英文文档",
+    "question": "Dockerfile 的 COPY 和 ADD 从本地构建上下文复制 tar 文件时有什么区别？ADD 的自动解压是否依赖文件扩展名，对远程 URL 又如何？",
+    "q": "Dockerfile ADD COPY local tar extraction URL extension",
+    "objective": "查找官方资料回答：Dockerfile 的 COPY 和 ADD 从本地构建上下文复制 tar 文件时有什么区别？ADD 的自动解压是否依赖文件扩展名，对远程 URL 又如何？",
+    "pq": [
+      "Dockerfile ADD COPY local tar extraction URL extension"
+    ],
+    "checks": [
+      "COPY是否解压",
+      "ADD本地归档自动解压条件",
+      "格式判定是否依赖扩展名",
+      "远程URL归档行为"
+    ],
+    "reference_urls": [
+      "https://docs.docker.com/reference/dockerfile/#add"
+    ]
+  },
+  {
+    "id": "E8",
+    "category": "英文文档",
+    "question": "Python dataclasses.field(default_factory=...) 的工厂函数接收几个参数、何时调用？能否同时指定 default？若字段 init=False，工厂调用有什么特别规则？",
+    "q": "Python dataclasses field default_factory init False default",
+    "objective": "查找官方资料回答：Python dataclasses.field(default_factory=...) 的工厂函数接收几个参数、何时调用？能否同时指定 default？若字段 init=False，工厂调用有什么特别规则？",
+    "pq": [
+      "Python dataclasses field default_factory init False default"
+    ],
+    "checks": [
+      "工厂参数数量",
+      "每实例按需调用",
+      "default与default_factory互斥",
+      "init False时调用规则"
+    ],
+    "reference_urls": [
+      "https://docs.python.org/3/library/dataclasses.html"
+    ]
+  },
+  {
+    "id": "T1",
+    "category": "时效信息",
+    "question": "截至本次检索时，Python 最新稳定版是哪个版本、何时发布？请排除 alpha、beta 和 rc 预发布。",
+    "q": "Python最新稳定版发布日期",
+    "objective": "Find Python.org latest stable Python release and exact release date as of this retrieval; exclude all alpha beta and release candidates",
+    "pq": [
+      "site:python.org downloads latest stable Python release date"
+    ],
+    "checks": [
+      "最新稳定版本号",
+      "发布日期",
+      "明确排除预发布"
+    ],
+    "reference_urls": [
+      "https://www.python.org/downloads/"
+    ]
+  },
+  {
+    "id": "T2",
+    "category": "时效信息",
+    "question": "截至本次检索时，Node.js 哪些主版本处于 Active LTS 和 Maintenance LTS，哪个处于 Current？请依据官方发布计划回答。",
+    "q": "Node.js当前 LTS 发布计划",
+    "objective": "Find official Node.js release schedule and current status of Current Active LTS Maintenance LTS versions as of this retrieval",
+    "pq": [
+      "Node.js official release schedule Current Active LTS Maintenance LTS"
+    ],
+    "checks": [
+      "Current主版本",
+      "Active LTS主版本",
+      "Maintenance LTS主版本",
+      "以检索日期解释计划而非只复述网页标签"
+    ],
+    "reference_urls": [
+      "https://nodejs.org/en/about/previous-releases",
+      "https://raw.githubusercontent.com/nodejs/Release/main/schedule.json"
+    ]
+  },
+  {
+    "id": "T3",
+    "category": "时效信息",
+    "question": "截至本次检索时，PostgreSQL 官方仍支持哪些主版本？其中最早停止支持的是哪个版本，计划日期是什么？",
+    "q": "PostgreSQL current supported versions end of life official",
+    "objective": "查找官方资料回答：截至本次检索时，PostgreSQL 官方仍支持哪些主版本？其中最早停止支持的是哪个版本，计划日期是什么？",
+    "pq": [
+      "PostgreSQL current supported versions end of life official"
+    ],
+    "checks": [
+      "完整受支持主版本列表",
+      "最早到期主版本",
+      "计划到期日",
+      "按检索日期筛选而非包括已到期版本"
+    ],
+    "reference_urls": [
+      "https://www.postgresql.org/support/versioning/"
+    ]
+  },
+  {
+    "id": "T4",
+    "category": "时效信息",
+    "question": "截至本次检索时，Go 最新稳定版本是什么、发布日期是哪天？官方安全修复支持覆盖哪些主版本系列？",
+    "q": "Go latest stable release date supported releases official",
+    "objective": "查找官方资料回答：截至本次检索时，Go 最新稳定版本是什么、发布日期是哪天？官方安全修复支持覆盖哪些主版本系列？",
+    "pq": [
+      "Go latest stable release date supported releases official"
+    ],
+    "checks": [
+      "最新稳定版本",
+      "发布日期",
+      "当前受支持系列",
+      "支持政策依据"
+    ],
+    "reference_urls": [
+      "https://go.dev/doc/devel/release",
+      "https://go.dev/security/policy"
+    ]
+  },
+  {
+    "id": "T5",
+    "category": "时效信息",
+    "question": "截至本次检索时，Django 最新正式发布版本是什么？当前仍受支持的 LTS 系列和各自扩展支持结束日期是什么？",
+    "q": "Django latest release supported LTS extended support dates",
+    "objective": "查找官方资料回答：截至本次检索时，Django 最新正式发布版本是什么？当前仍受支持的 LTS 系列和各自扩展支持结束日期是什么？",
+    "pq": [
+      "Django latest release supported LTS extended support dates"
+    ],
+    "checks": [
+      "最新正式版本",
+      "当前受支持LTS系列",
+      "每个LTS扩展支持结束日期",
+      "不把未来计划版本算作已发布"
+    ],
+    "reference_urls": [
+      "https://www.djangoproject.com/download/"
+    ]
+  },
+  {
+    "id": "T6",
+    "category": "时效信息",
+    "question": "截至本次检索时，Ubuntu 24.04 LTS 和 22.04 LTS 的标准安全维护分别到哪个年月？这与 Ubuntu Pro 的扩展维护终止时间有什么区别？",
+    "q": "Ubuntu 24.04 22.04 LTS standard security maintenance Ubuntu Pro end dates",
+    "objective": "查找官方资料回答：截至本次检索时，Ubuntu 24.04 LTS 和 22.04 LTS 的标准安全维护分别到哪个年月？这与 Ubuntu Pro 的扩展维护终止时间有什么区别？",
+    "pq": [
+      "Ubuntu 24.04 22.04 LTS standard security maintenance Ubuntu Pro end dates"
+    ],
+    "checks": [
+      "24.04标准维护年月",
+      "22.04标准维护年月",
+      "扩展维护年月",
+      "区分标准维护和Pro扩展维护"
+    ],
+    "reference_urls": [
+      "https://ubuntu.com/about/release-cycle"
+    ]
+  },
+  {
+    "id": "T7",
+    "category": "时效信息",
+    "question": "截至本次检索时，Python 3.12 与 3.13 各处于哪种维护阶段，计划何时结束支持？安全维护阶段是否继续提供常规二进制维护版本？",
+    "q": "Python 3.12 3.13 status end of life security binary releases",
+    "objective": "查找官方资料回答：截至本次检索时，Python 3.12 与 3.13 各处于哪种维护阶段，计划何时结束支持？安全维护阶段是否继续提供常规二进制维护版本？",
+    "pq": [
+      "Python 3.12 3.13 status end of life security binary releases"
+    ],
+    "checks": [
+      "3.12阶段和结束日期",
+      "3.13阶段和结束日期",
+      "安全阶段的发布形式",
+      "按检索日期解释计划"
+    ],
+    "reference_urls": [
+      "https://devguide.python.org/versions/",
+      "https://peps.python.org/pep-0693/",
+      "https://peps.python.org/pep-0719/"
+    ]
+  },
+  {
+    "id": "T8",
+    "category": "时效信息",
+    "question": "截至本次检索时，Rust 最新稳定版本是什么、发布日期是哪天？请区分 stable、beta、nightly 发布通道。",
+    "q": "Rust latest stable release date beta nightly official",
+    "objective": "查找官方资料回答：截至本次检索时，Rust 最新稳定版本是什么、发布日期是哪天？请区分 stable、beta、nightly 发布通道。",
+    "pq": [
+      "Rust latest stable release date beta nightly official"
+    ],
+    "checks": [
+      "最新稳定版本",
+      "发布日期",
+      "区分三个通道且不把预发布算稳定版"
+    ],
+    "reference_urls": [
+      "https://blog.rust-lang.org/releases/",
+      "https://doc.rust-lang.org/book/appendix-07-nightly-rust.html"
+    ]
+  },
+  {
+    "id": "D1",
+    "category": "直答",
+    "question": "北京今天的最高、最低气温分别是多少，天气或降水情况如何？请写明预报日期；若不同来源冲突，不要混成一份预报。",
+    "q": "北京今天天气",
+    "objective": "Find today's Beijing weather forecast with forecast date high low temperature and precipitation conditions from a consistent source",
+    "pq": [
+      "北京 今日天气 最高 最低 气温"
+    ],
+    "checks": [
+      "预报日期",
+      "最高气温",
+      "最低气温",
+      "同一来源天气降水，冲突时说明"
+    ],
+    "reference_urls": [
+      "https://www.weather.com.cn/weather/101010100.shtml",
+      "https://bj.cma.gov.cn/"
+    ]
+  },
+  {
+    "id": "D2",
+    "category": "直答",
+    "question": "2026 年中国大陆中秋节放假是哪几天，共几天？是否需要调休上班？",
+    "q": "2026年中秋节放假安排",
+    "objective": "Find State Council official 2026 Mid-Autumn Festival holiday dates number of days and any make-up work days",
+    "pq": [
+      "2026年 中秋节 放假安排 国务院办公厅 调休"
+    ],
+    "checks": [
+      "起止日期",
+      "总天数",
+      "是否调休上班"
+    ],
+    "reference_urls": [
+      "https://www.gov.cn/zhengce/content/202511/content_7047090.htm"
+    ]
+  },
+  {
+    "id": "D3",
+    "category": "直答",
+    "question": "2026 年中国大陆国庆节放假起止日期和天数是什么？哪些日期需要调休上班？",
+    "q": "2026年国庆节放假安排 调休 国务院办公厅",
+    "objective": "查找官方资料回答：2026 年中国大陆国庆节放假起止日期和天数是什么？哪些日期需要调休上班？",
+    "pq": [
+      "2026年国庆节放假安排 调休 国务院办公厅"
+    ],
+    "checks": [
+      "放假起止日期",
+      "天数",
+      "全部调休上班日期"
+    ],
+    "reference_urls": [
+      "https://www.gov.cn/zhengce/content/202511/content_7047090.htm"
+    ]
+  },
+  {
+    "id": "D4",
+    "category": "直答",
+    "question": "2026 年中国大陆春节假期从哪天到哪天，共多少天？假期前后分别有哪些调休上班日？",
+    "q": "2026年春节放假安排 调休 国务院办公厅",
+    "objective": "查找官方资料回答：2026 年中国大陆春节假期从哪天到哪天，共多少天？假期前后分别有哪些调休上班日？",
+    "pq": [
+      "2026年春节放假安排 调休 国务院办公厅"
+    ],
+    "checks": [
+      "假期起止日期",
+      "天数",
+      "假前调休上班日",
+      "假后调休上班日"
+    ],
+    "reference_urls": [
+      "https://www.gov.cn/zhengce/content/202511/content_7047090.htm"
+    ]
+  },
+  {
+    "id": "D5",
+    "category": "直答",
+    "question": "上海今天的最高、最低气温分别是多少，有没有降雨？请写明预报日期和来源，不要混用不同日期或来源的高低温。",
+    "q": "上海今天天气 最高 最低 降雨",
+    "objective": "查找官方资料回答：上海今天的最高、最低气温分别是多少，有没有降雨？请写明预报日期和来源，不要混用不同日期或来源的高低温。",
+    "pq": [
+      "上海今天天气 最高 最低 降雨"
+    ],
+    "checks": [
+      "预报日期",
+      "最高气温",
+      "最低气温",
+      "降雨及预报来源一致"
+    ],
+    "reference_urls": [
+      "https://www.weather.com.cn/weather/101020100.shtml",
+      "https://sh.cma.gov.cn/"
+    ]
+  },
+  {
+    "id": "D6",
+    "category": "直答",
+    "question": "中国科学院紫金山天文台发布的 2026 年二十四节气中，秋分和冬至分别是哪一天、几点几分？这些时间采用什么时区？",
+    "q": "紫金山天文台 2026 二十四节气 秋分 冬至 时间",
+    "objective": "查找官方资料回答：中国科学院紫金山天文台发布的 2026 年二十四节气中，秋分和冬至分别是哪一天、几点几分？这些时间采用什么时区？",
+    "pq": [
+      "紫金山天文台 2026 二十四节气 秋分 冬至 时间"
+    ],
+    "checks": [
+      "秋分日期时间",
+      "冬至日期时间",
+      "时区依据"
+    ],
+    "reference_urls": [
+      "https://www.pmo.cas.cn/"
+    ]
+  },
+  {
+    "id": "D7",
+    "category": "直答",
+    "question": "故宫博物院官方参观须知中的旺季和淡季各覆盖哪些月份，门票价格分别是多少？珍宝馆和钟表馆门票是否包含在大门票内？",
+    "q": "故宫博物院 旺季 淡季 门票 珍宝馆 钟表馆",
+    "objective": "查找官方资料回答：故宫博物院官方参观须知中的旺季和淡季各覆盖哪些月份，门票价格分别是多少？珍宝馆和钟表馆门票是否包含在大门票内？",
+    "pq": [
+      "故宫博物院 旺季 淡季 门票 珍宝馆 钟表馆"
+    ],
+    "checks": [
+      "旺淡季月份",
+      "旺季大门票价格",
+      "淡季大门票价格",
+      "专馆票是否另购及适用限制"
+    ],
+    "reference_urls": [
+      "https://www.dpm.org.cn/Visit.html"
+    ]
+  },
+  {
+    "id": "D8",
+    "category": "直答",
+    "question": "中国国家博物馆通常周几闭馆、几点停止入馆？法定节假日有什么例外，是否需要提前预约？",
+    "q": "中国国家博物馆 开放时间 停止入馆 周一 法定节假日 预约",
+    "objective": "查找官方资料回答：中国国家博物馆通常周几闭馆、几点停止入馆？法定节假日有什么例外，是否需要提前预约？",
+    "pq": [
+      "中国国家博物馆 开放时间 停止入馆 周一 法定节假日 预约"
+    ],
+    "checks": [
+      "通常闭馆日",
+      "停止入馆时间",
+      "法定节假日例外",
+      "预约要求"
+    ],
+    "reference_urls": [
+      "https://www.chnmuseum.cn/cg/"
+    ]
+  }
+]

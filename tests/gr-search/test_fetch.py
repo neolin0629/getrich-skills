@@ -413,15 +413,18 @@ def test_repeated_plain_lines_are_kept(repeated):
     assert sources.clean_text(text).count(repeated.strip()) == 2
 
 
-def test_repeated_nav_links_are_still_deduped():
-    """收窄不能把原本的收益丢了：导航条在抓取结果里就是链接行，
-    响应式站点的移动版+桌面版菜单会整段重复。"""
+@pytest.mark.parametrize("line", [
+    "[产品文档](https://a/1)",
+    "请访问 [控制台](https://a/1) 创建项目。",
+    "[Linux 下载](https://a/linux) [Windows 下载](https://a/windows)",
+])
+def test_repeated_link_content_is_kept(line):
+    """链接和重复句子本身不能证明是导航。"""
     import sources
 
-    nav = "[产品文档](https://a/1)"
-    text = f"{nav}\n正文一\n{nav}\n正文二"
-    assert sources.clean_text(text).count("产品文档") == 1
-    assert "正文一" in sources.clean_text(text) and "正文二" in sources.clean_text(text)
+    text = f"{line}\n第一步\n{line}\n第二步"
+    assert sources.clean_text(text) == text
+
 
 
 def _extract_cmd(monkeypatch, urls, objective=None):

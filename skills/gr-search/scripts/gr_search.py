@@ -8,7 +8,7 @@
     python3 gr_search.py config set-key doubao|parallel | show | path | doctor
 
 设计要点:
-- 豆包为主、Parallel 为补充，结果去重融合后按 token 预算压缩输出
+- 默认双源并行、等权 RRF 融合，按字符预算压缩输出
 - 全量结果落盘 JSON，agent 追问时直接读文件，不必重新搜索
 - 任一源失败不影响另一源，输出里显式标注失败原因
 - --dry-run 打印请求体但不发请求，用于核对豆包的 PascalCase 字段名
@@ -198,10 +198,9 @@ def run_search(args: argparse.Namespace, cfg: dict) -> int:
         except Exception as exc:
             return sources.SourceResult("parallel", error=f"{type(exc).__name__}: {exc}")
 
-    # 卡片短路：如意卡片本身就是权威直答，命中时没必要再花钱调 Parallel。
-    # 代价是先跑豆包再决定，非命中场景会多等豆包那一跳（约 0.7s）。
+    # 显式省调用模式才先查豆包；默认并行，避免未命中卡片时累加两路延迟。
     shortcircuit = (
-        cfg.get("card_shortcircuit", True)
+        (getattr(args, "card_shortcircuit", False) or cfg.get("card_shortcircuit", False))
         and not args.force_all
         and use_doubao
         and use_parallel
@@ -242,6 +241,16 @@ def run_search(args: argparse.Namespace, cfg: dict) -> int:
     elapsed = time.monotonic() - started
 
     budget, profile = cfgmod.resolve_budget(cfg, args.profile, args.budget)
+    diagnostics = {
+        "ranking": "rrf-v2", "fresh": bool(fresh), "strong_fresh": bool(strong_fresh),
+        "effective_dedup_threshold": 1.0, "dedup_mode": "exact_body",
+        "fusion": {key: cfg["fusion"][key] for key in
+                   ("weight_doubao", "weight_parallel", "rrf_k", "dedup_jaccard")},
+        "dispatch": "card_shortcircuit" if shortcircuit else
+                    ("parallel" if use_doubao and use_parallel else "single"),
+        "sources": {r.source: {"elapsed": round(r.elapsed, 3), "cached": r.cached,
+                               "count": len(r.docs), "failed": bool(r.error)} for r in results},
+    }
 
     # ---------------- 全量落盘：压缩输出之外的信息不丢，追问时直接读文件
     dump_path = None
@@ -259,6 +268,7 @@ def run_search(args: argparse.Namespace, cfg: dict) -> int:
             # 否则 fetch 会拿一个从未创建过的 session 去串上下文。
             "session_id": parallel_session_id(results, opts["session_id"]),
             "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "diagnostics": diagnostics,
             "stats": stats,
             "errors": errors,
             "cards": cards,
@@ -283,6 +293,8 @@ def run_search(args: argparse.Namespace, cfg: dict) -> int:
                 "_notice": UNTRUSTED_NOTICE,
                 "query": query, "elapsed": round(elapsed, 2),
                 "stats": stats, "errors": errors, "cards": cards,
+                "diagnostics": diagnostics,
+                "session_id": parallel_session_id(results, opts["session_id"]),
                 "dump": dump_path,
                 "docs": [asdict(d) for d in ranked],
             },
@@ -294,6 +306,7 @@ def run_search(args: argparse.Namespace, cfg: dict) -> int:
         query=query, items=ranked, cards=cards, budget=budget, profile=profile,
         stats=stats, errors=errors, elapsed=elapsed, dump_path=dump_path,
         image_mode=image_mode,
+        selection_query=" ".join([query, args.objective or "", *(args.pq or [])]),
     ))
     return 0 if (ranked or cards) else 1
 
@@ -411,6 +424,19 @@ def run_fetch(args: argparse.Namespace, cfg: dict) -> int:
 
 
 def run_config(args: argparse.Namespace, cfg: dict) -> int:
+    if getattr(args, "apply", False) and args.op != "migrate-defaults":
+        print("--apply 仅用于 config migrate-defaults", file=sys.stderr)
+        return 2
+    if args.op == "migrate-defaults":
+        try:
+            changes = cfgmod.migrate_defaults(apply=getattr(args, "apply", False))
+        except (OSError, ValueError):
+            print("无法迁移：配置不可读、格式错误或无法写入；原配置未主动重置。", file=sys.stderr)
+            return 1
+        print(json.dumps(changes, ensure_ascii=False, indent=2))
+        print("已应用新默认行为。" if getattr(args, "apply", False) else
+              "仅预览；添加 --apply 将以上行为设置写入配置。")
+        return 0
     if args.op == "path":
         print(cfgmod.CONFIG_PATH)
         return 0
@@ -516,7 +542,9 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--mode", choices=["turbo", "fast", "basic", "advanced"], help="Parallel 检索档位")
     search.add_argument("--no-cache", action="store_true")
     search.add_argument("--no-dump", action="store_true")
-    search.add_argument("--force-all", action="store_true", help="关闭卡片短路，强制两个源都调")
+    dispatch = search.add_mutually_exclusive_group()
+    dispatch.add_argument("--force-all", action="store_true", help="覆盖配置中的卡片短路，强制双源并行")
+    dispatch.add_argument("--card-shortcircuit", action="store_true", help="先查豆包，命中卡片后省略 Parallel")
     search.add_argument("--dry-run", action="store_true")
     search.add_argument("--json", action="store_true")
 
@@ -527,8 +555,9 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--session-id", help="复用某次 search 落盘 JSON 里的 session_id 以串联上下文")
 
     conf = sub.add_parser("config", help="配置与诊断")
-    conf.add_argument("op", choices=["set-key", "show", "path", "doctor"])
+    conf.add_argument("op", choices=["set-key", "show", "path", "doctor", "migrate-defaults"])
     conf.add_argument("target", nargs="?", choices=["doubao", "parallel"])
+    conf.add_argument("--apply", action="store_true", help="应用 migrate-defaults 预览的行为设置")
 
     return parser
 

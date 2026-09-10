@@ -66,7 +66,7 @@ def test_w3_allows_one_connector_in_a_short_text():
     assert not [hit for hit in result["hits"] if hit["rule"] == "W3"]
 
 
-def test_strict_genres_escalate_aggregate_hits_before_normal_exemptions():
+def test_strict_genres_preserve_normal_exemptions():
     cases = [
         ("然而，这次结果不同。", "video", "W3"),
         ("甲" * 997 + "彰显。", "academic", "W1"),
@@ -75,10 +75,9 @@ def test_strict_genres_escalate_aggregate_hits_before_normal_exemptions():
     for text, genre, rule in cases:
         proc, result = run_check(text, genre=genre, fail_on="high")
 
-        assert proc.returncode == 1
-        assert metric(result, rule)["flagged"] is True
-        assert metric(result, rule)["severity"] == "high"
-        assert any(hit["rule"] == rule for hit in result["hits"])
+        assert proc.returncode == 0
+        assert metric(result, rule)["flagged"] is False
+        assert not any(hit["rule"] == rule for hit in result["hits"])
 
 
 def test_overlapping_aggregate_rules_keep_locations_for_the_flagged_rule():
@@ -118,12 +117,13 @@ def test_short_text_allows_one_dash():
     assert metric(result, "F1")["flagged"] is False
 
 
-def test_r1_is_enforced_for_quant_not_generic_content():
+def test_r1_requires_manual_review_without_keyword_verdicts():
     _, generic = run_check("这是一段事实说明。" * 60)
     _, quant = run_check("这是量化分析。" * 70, genre="quant")
 
     assert not [row for row in generic["metrics"] if row["key"] == "R1"]
-    assert metric(quant, "R1")["flagged"] is True
+    assert not [row for row in quant["metrics"] if row["key"] == "R1"]
+    assert "R1" in quant["manual_review"]
 
 
 def test_directory_input_returns_usage_error_without_traceback():
@@ -147,8 +147,10 @@ def test_directory_input_returns_usage_error_without_traceback():
     ("苹果、香蕉、葡萄\n普通正文。", True),
 ])
 def test_s1_checks_the_whole_enumeration(text, expected):
-    _, result = run_check(text)
+    proc, result = run_check(text, fail_on="high")
     assert bool([h for h in result["hits"] if h["rule"] == "S1"]) is expected
+    assert proc.returncode == 0  # 项目数量不能证明刻意凑项。
+    assert all(h["severity"] == "low" for h in result["hits"] if h["rule"] == "S1")
 
 
 def test_literal_correction_does_not_fail_as_an_aphorism():
@@ -246,3 +248,129 @@ def test_s3_deduplicates_overlapping_sentence_patterns():
     _, above = run_check(raw + "与其说路面干了不如说雨停了。")
     assert not [h for h in below["hits"] if h["rule"] == "S3"]
     assert len([h for h in above["hits"] if h["rule"] == "S3"]) == 3
+
+
+@pytest.mark.parametrize('raw', [
+    '本次结论仅覆盖沪深市场日频数据，区间为 2019 年至 2024 年，未覆盖其他市场，也未扣除滑点。',
+    '该策略在任何市场都不会失效。',
+    '我们已完成样本外验证，因此任何情况下都有收益。',
+    '我不确定。',
+])
+def test_r1_never_uses_word_presence_as_evidence(raw):
+    _, result = run_check(raw, genre='quant')
+    assert 'R1' in result['manual_review']
+    assert not any(m['key'] == 'R1' for m in result['metrics'])
+    assert not any(h['rule'] == 'R1' for h in result['hits'])
+
+
+@pytest.mark.parametrize('genre, expected', [('quant', True), ('academic', False), ('copy', False)])
+def test_manual_review_respects_genre(genre, expected):
+    _, result = run_check('本次数据已整理完毕。', genre=genre)
+    assert ('R1' in result['manual_review']) is expected
+
+
+@pytest.mark.parametrize('raw, rule', [
+    ('这次实测延迟是 1.7 秒。', 'R2'),
+    ('监控日志记录停顿了 3.5 秒。', 'R2'),  # 时间候选可复核，但不能认定数据虚假。
+    ('我有个朋友，昨天帮我修了水管。', 'R4'),
+    ('本次问卷共回收 100 份，原始数据见附表。数据显示，60 人选择公交。', 'C5'),
+    ('原文写道：“愿你平安。”', 'P4'),
+    ('苹果、香蕉、葡萄。', 'S1'),
+])
+def test_semantic_candidates_do_not_fail_high(raw, rule):
+    proc, result = run_check(raw, genre='quant', fail_on='high')
+    assert proc.returncode == 0
+    assert all(h['severity'] == 'low' for h in result['hits'] if h['rule'] == rule)
+
+
+@pytest.mark.parametrize('raw, rule', [
+    ('这次实测延迟是 1.7 秒。', 'R2'),
+    ('屋里的天花板漏水了。', 'C9'),
+    ('我们修好了水泵，为村里提供了饮用水。', 'S5'),
+    ('我们修好了水泵，为村里提供了饮用水。', 'P2'),
+    ('我们买了发电机，让停电的教室能够继续上课。', 'S5'),
+    ('## 发货时间\n\n发货时间为周一。', 'P2'),
+    ('## 流动性\n\n流动性下降了两成。', 'P2'),
+    ('祝你生日快乐！', 'P4'),
+])
+def test_concrete_statements_are_not_reported_as_empty_or_fake(raw, rule):
+    _, result = run_check(raw)
+    assert not any(h['rule'] == rule for h in result['hits'])
+
+
+@pytest.mark.parametrize('raw, rule', [
+    ('那一刻，1.7 秒后，我心头一紧。', 'R2'),
+    ('这个产品堪称行业天花板。', 'C9'),
+    ('项目顺利完成，为未来发展奠定了坚实基础。', 'S5'),
+    ('## 关于流动性\n\n流动性很重要。', 'P2'),
+    ('## 发货时间\n\n发货时间。', 'P2'),
+    ('好了，接着往下讲。', 'P2'),
+    ('有研究表明，这个方法有效。', 'C5'),
+])
+def test_problematic_counterparts_remain_visible(raw, rule):
+    _, result = run_check(raw)
+    assert any(h['rule'] == rule for h in result['hits'])
+
+
+def test_p4_only_scans_tail_and_does_not_double_count():
+    raw = '愿你平安。' + '甲' * 220 + '。记录结束。'
+    _, middle = run_check(raw)
+    assert not any(h['rule'].startswith('P4') for h in middle['hits'])
+    _, tail = run_check('记录结束。愿你平安。')
+    hits = [h for h in tail['hits'] if h['rule'].startswith('P4')]
+    assert [(h['rule'], h['matched']) for h in hits] == [('P4', '愿你')]
+    assert tail['severity_totals']['low'] == 1
+
+
+@pytest.mark.parametrize('prefix', [
+    '参考 https://example.com。',
+    '参考 https://example.com，',
+    '参考 https://example.com?q=报告。',
+    '参考 https://example.com/a?x=1&y=2；\n',
+])
+def test_url_mask_preserves_following_chinese_text_and_locations(prefix):
+    raw = prefix + '这是一个非常好的问题。'
+    _, result = run_check(raw)
+    hit = next(h for h in result['hits'] if h['rule'] == 'F6')
+    assert hit['offset'] == len(prefix)
+    assert hit['line'] == prefix.count('\n') + 1
+    assert raw[hit['offset']:].startswith(hit['matched'])
+
+
+def test_strict_still_escalates_excess_connectors():
+    proc, result = run_check('然而今天下雨。不过我带了伞。', genre='video', fail_on='high')
+    assert proc.returncode == 1
+    assert metric(result, 'W3')['flagged'] is True
+    assert metric(result, 'W3')['severity'] == 'high'
+
+
+def test_uniform_sentences_are_advisory_even_in_strict_genre():
+    proc, result = run_check('记录已经整理完毕。' * 10, genre='wechat', fail_on='high')
+    assert proc.returncode == 0
+    assert metric(result, 'S2')['flagged'] is True
+    assert metric(result, 'S2')['severity'] == 'low'
+
+
+@pytest.mark.parametrize('genre', ['persona', 'copy', 'video', 'weibo', 'academic'])
+def test_genres_allow_short_sentence_sequences(genre):
+    _, result = run_check('到家了。洗个澡。睡觉了。', genre=genre)
+    assert not any(m['key'] in {'S7', 'S7b'} for m in result['metrics'])
+
+
+def test_any_includes_low_candidates_but_default_does_not_fail():
+    default, result = run_check('苹果、香蕉、葡萄。')
+    high, _ = run_check('苹果、香蕉、葡萄。', fail_on='high')
+    any_hit, _ = run_check('苹果、香蕉、葡萄。', fail_on='any')
+    assert (default.returncode, high.returncode, any_hit.returncode) == (0, 0, 1)
+    assert result['severity_totals'] == {'high': 0, 'mid': 0, 'low': 1}
+
+
+def test_render_discloses_manual_review_and_does_not_offer_r1_pass():
+    proc = subprocess.run(
+        [sys.executable, str(CHECK), '-', '--genre', 'quant'],
+        input='本次研究只覆盖一个市场。', text=True, capture_output=True,
+    )
+    assert proc.returncode == 0
+    assert 'R1：' in proc.stdout
+    assert '未自动判定通过或失败' in proc.stdout
+    assert '不确定表达处数' not in proc.stdout

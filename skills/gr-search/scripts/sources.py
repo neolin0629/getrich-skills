@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -120,44 +121,41 @@ _NOISE_WORDS = (
 _NOISE_LINE = re.compile(
     rf"^\s*(?:\[\s*)?(?:{_NOISE_WORDS})(?:\s*\]\([^)]*\))?\s*$", re.IGNORECASE
 )
-# 整行只有两个以上 markdown 链接、没有其他文字 —— 基本可以断定是导航条
-_LINK_ONLY_LINE = re.compile(r"^\s*(?:\[[^\]]*\]\([^)]*\)[\s|·,、]*){2,}$")
-_NOISE_WINDOW = 40  # 同一行在这个窗口内重复出现即视为导航重复
-# 只有**带 markdown 链接**的行才参与重复去除。
-# 无差别去重会静默删掉正文：两段结构相同的代码示例里，第二段的 `return None`
-# 直接消失；表格行、重复日志同理。而 SKILL.md 恰恰把 fetch 定位到文档站。
-# 导航条在抓取结果里本来就是链接行，限定到链接行既保住了原本的收益，
-# 又不会碰到正文——宁可漏删几行菜单，也不能删用户要读的内容。
-_HAS_LINK = re.compile(r"\[[^\]]*\]\([^)]*\)")
 # 零宽与方向控制字符：抓取内容里很常见，白占 token 还会干扰去重比对
 _ZERO_WIDTH = re.compile("[­​-‏‪-‮⁠﻿]")
-_BLANK_RUN = re.compile(r"\n{3,}")
 
 
 def clean_text(text: str) -> str:
-    """清掉零宽字符、样板噪声行和重复的导航行，折叠多余空行。
+    """清掉零宽字符和明确的导航控件，保留代码块、链接列表和重复步骤。
 
     导航条在抓取结果里常常整段重复出现两三次（响应式站点的移动版 + 桌面版菜单），
     不去重的话能吃掉整页预算 —— 实测火山引擎文档站的前 3000 字符几乎全是菜单。
     """
     if not text:
         return ""
-    text = _ZERO_WIDTH.sub("", text)
     kept: list[str] = []
-    recent: dict[str, int] = {}
-    for index, raw in enumerate(text.splitlines()):
-        line = raw.rstrip()
-        if _NOISE_LINE.match(line) or _LINK_ONLY_LINE.match(line):
+    fence_char = ""
+    fence_size = 0
+    for raw in text.split("\n"):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", raw)
+        if fence_char:
+            kept.append(raw)
+            if (marker and marker[1][0] == fence_char and len(marker[1]) >= fence_size
+                    and not marker[2].strip()):
+                fence_char = ""
             continue
-        stripped = line.strip()
-        if len(stripped) > 2 and _HAS_LINK.search(stripped):
-            seen_at = recent.get(stripped)
-            if seen_at is not None and index - seen_at <= _NOISE_WINDOW:
-                recent[stripped] = index
-                continue
-            recent[stripped] = index
+        if marker:
+            fence_char, fence_size = marker[1][0], len(marker[1])
+            kept.append(raw)
+            continue
+        if raw.startswith(("    ", "\t")):
+            kept.append(raw)
+            continue
+        line = _ZERO_WIDTH.sub("", raw).rstrip()
+        if _NOISE_LINE.match(line):
+            continue
         kept.append(line)
-    return _BLANK_RUN.sub("\n\n", "\n".join(kept)).strip()
+    return "\n".join(kept)
 
 
 @dataclass
@@ -286,12 +284,30 @@ def _post_json(url: str, payload: dict, api_key: str, timeout: int) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
+def _rank_score(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        score = float(value)
+    except (ValueError, OverflowError):
+        return None
+    return score if math.isfinite(score) and 0 <= score <= 1 else None
+
+
+def _authority(value: Any) -> int | None:
+    return value if type(value) is int and value in AUTHORITY_LABEL else None
+
+
+def _text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
 def _map_custom(body: dict) -> tuple[list[Doc], list[dict]]:
     """映射 Custom 版响应。web 搜索读 WebResults，图片搜索读 ImageResults。"""
     result = body.get("Result") or {}
     docs: list[Doc] = []
 
-    for index, item in enumerate(result.get("WebResults") or []):
+    for index, item in enumerate(result.get("WebResults") or [], start=1):
         # 官方文档：Summary(500~1000字) 推荐用于大模型场景；
         # Snippet(约200字) 明确标注「强烈不建议用于大模型场景」，只作兜底。
         body_text = item.get("Summary") or item.get("Content") or item.get("Snippet") or ""
@@ -302,10 +318,10 @@ def _map_custom(body: dict) -> tuple[list[Doc], list[dict]]:
                 body=clean_text(body_text),
                 site=item.get("SiteName") or "",
                 source="doubao",
-                rank=item.get("SortId", index) if isinstance(item.get("SortId"), int) else index,
-                publish=item.get("PublishTime") or None,
-                authority=item.get("AuthInfoLevel"),
-                rank_score=item.get("RankScore"),
+                rank=index,
+                publish=_text(item.get("PublishTime")) or None,
+                authority=_authority(item.get("AuthInfoLevel")),
+                rank_score=_rank_score(item.get("RankScore")),
                 images=[
                     {
                         "url": img.get("ImageUrl"),
@@ -323,7 +339,7 @@ def _map_custom(body: dict) -> tuple[list[Doc], list[dict]]:
             )
         )
 
-    for index, item in enumerate(result.get("ImageResults") or []):
+    for index, item in enumerate(result.get("ImageResults") or [], start=1):
         image = item.get("Image") or {}
         features = image.get("Features") or {}
         docs.append(
@@ -333,9 +349,9 @@ def _map_custom(body: dict) -> tuple[list[Doc], list[dict]]:
                 body=features.get("Description") or "",
                 site=item.get("SiteName") or "",
                 source="doubao",
-                rank=item.get("SortId", index) if isinstance(item.get("SortId"), int) else index,
-                publish=item.get("PublishTime") or None,
-                rank_score=item.get("RankScore"),
+                rank=index,
+                publish=_text(item.get("PublishTime")) or None,
+                rank_score=_rank_score(item.get("RankScore")),
                 images=[
                     {
                         "url": image.get("Url"),
@@ -600,7 +616,7 @@ def _post_parallel(path: str, payload: dict, api_key: str, timeout: int) -> dict
 
 def _map_parallel(body: dict) -> list[Doc]:
     docs: list[Doc] = []
-    for index, item in enumerate(body.get("results") or []):
+    for index, item in enumerate(body.get("results") or [], start=1):
         docs.append(
             Doc(
                 url=item.get("url") or "",
@@ -609,7 +625,7 @@ def _map_parallel(body: dict) -> list[Doc]:
                 site="",  # Parallel 不返回站点名，交给 fusion 从 URL 推导
                 source="parallel",
                 rank=index,
-                publish=item.get("publish_date") or None,
+                publish=_text(item.get("publish_date")) or None,
             )
         )
     return docs

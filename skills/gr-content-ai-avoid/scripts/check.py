@@ -3,7 +3,7 @@
 """
 gr-content-ai-avoid 机械自检脚本。
 
-只检查可量化的 AI 写作指纹：高频词、结构句式、密度指标。
+只定位表达模式：高频词、结构句式、密度指标，不鉴定作者或事实真伪。
 C/R 层只有部分表面模式能机械提示，语义是否成立仍要靠人按 references/rules.md 判断。
 
 用法：
@@ -78,7 +78,8 @@ def preprocess(raw: str) -> str:
     text = blank_out(text, re.compile(r"`[^`\n]+`"))
     text = blank_out(text, re.compile(r"!\[[^\]\n]*\]\([^)\n]*\)"))
     text = preserve_link_labels(text)
-    text = blank_out(text, re.compile(r"https?://\S+"))
+    # 裸 URL 遇中文标点结束，避免吞掉紧接着的中文正文。
+    text = blank_out(text, re.compile(r"https?://[^\s<>\"'。，、！？；：“”‘’]+"))
     text = blank_out(text, re.compile(r"<[^>\n]{1,80}>"))
     return text
 
@@ -208,10 +209,6 @@ def scan_lexicon(text: str, lexicon: dict, active: set[str]) -> list[Hit]:
                 hits.append(Hit(rule, cfg["name"], sev, start, end,
                                 m.group(group), rx.get("desc", ""), hint))
     return hits
-
-
-def count_positive(text: str, cfg: dict) -> int:
-    return sum(text.count(w) for w in cfg.get("words", []))
 
 
 def count_non_overlapping_matches(text: str, cfg: dict) -> int:
@@ -379,11 +376,13 @@ def scan_empty_headers(text: str, active: set[str]) -> list[Hit]:
             if re.match(r"^([-*+>#|]|\d+[.、])", nxt):
                 break
             body = re.sub(r"[^\w一-鿿]", "", nxt)
-            shared = len(set(title) & set(body))
-            if content_len(nxt) <= 15 and shared >= 2:
+            subject = re.sub(r"^(关于|有关)", "", title)
+            # 只提示原样复述或明确的空泛评价；共享字符不能证明没有新信息。
+            empty = re.fullmatch(re.escape(subject) + r"(?:(?:是)?(?:很重要|非常重要|至关重要|不可忽视|值得关注))?", body)
+            if len(subject) >= 2 and empty:
                 hits.append(Hit("P2", "空转与预告", "mid", offsets[j],
                                 offsets[j] + len(lines[j]), nxt[:30],
-                                "标题下的空转句", "标题下第一句就写真内容。"))
+                                "标题下可能重复标题", "确认是否提供了新信息；有事实就保留。"))
             break
     return hits
 
@@ -408,9 +407,8 @@ def compute_metrics(text: str, cfg_all: dict, genre: str, active: set[str],
         mean = sum(lens) / len(lens)
         sd = math.sqrt(sum((x - mean) ** 2 for x in lens) / len(lens))
         cv = sd / mean if mean else 0.0
-        strong = cv < c.get("strong_below", 0.25)
         add("S2", "句长变异系数", round(cv, 3), f"≥ {c.get('warn_below', 0.35)}",
-            cv < c.get("warn_below", 0.35), "high" if strong else "mid", c.get("hint", ""))
+            cv < c.get("warn_below", 0.35), c.get("severity", "low"), c.get("hint", ""))
 
     # S7 段末金句率
     c = cfg_all.get("S7_punchline_rate", {})
@@ -426,9 +424,9 @@ def compute_metrics(text: str, cfg_all: dict, genre: str, active: set[str],
                 hitn += 1
         if tot:
             rate = hitn / tot
-            add("S7", "段末金句率", f"{rate:.0%} ({hitn}/{tot})",
+            add("S7", "段末短句比例", f"{rate:.0%} ({hitn}/{tot})",
                 f"≤ {c.get('warn_above', 0.6):.0%}", rate > c.get("warn_above", 0.6),
-                "mid", c.get("hint", ""))
+                c.get("severity", "low"), c.get("hint", ""))
 
     # S7 连续短句
     c = cfg_all.get("S7_staccato_run", {})
@@ -481,17 +479,6 @@ def compute_metrics(text: str, cfg_all: dict, genre: str, active: set[str],
         add("W3", "连接词/句", f"{d:.2f} ({cnt}/{len(sents)})", threshold, bad,
             "mid", lexicon["W3"].get("hint", ""))
 
-    # R1 不确定表达（越少越糟）
-    c = cfg_all.get("R1_uncertainty_count", {})
-    key = "R1_uncertainty_markers"
-    enforce_genres = set(c.get("enforce_genres", []))
-    if ("R1_uncertainty_count" in active and key in lexicon
-            and chars >= c.get("min_chars", 400)
-            and (not enforce_genres or genre in enforce_genres)):
-        cnt = count_positive(text, lexicon[key])
-        add("R1", "不确定表达处数", cnt, f"≥ {c.get('warn_below', 1)}",
-            cnt < c.get("warn_below", 1), c.get("severity", "mid"), c.get("hint", ""))
-
     return rows
 
 
@@ -500,7 +487,7 @@ def compute_metrics(text: str, cfg_all: dict, genre: str, active: set[str],
 # --------------------------------------------------------------------------- #
 
 def build_active(cfg: dict, genre: str) -> set[str]:
-    all_keys = set(cfg["lexicon"]) | set(cfg["regex_rules"]) | set(cfg["metrics"])
+    all_keys = set(cfg["lexicon"]) | set(cfg["regex_rules"]) | set(cfg["metrics"]) | set(cfg.get("manual_rules", {}))
     skip = set(cfg["genres"].get(genre, {}).get("skip", []))
     active = {k for k in all_keys if k not in skip}
     for s in skip:  # 支持用基础 ID 屏蔽（如 skip: ["P6"]）
@@ -521,7 +508,7 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
 
     metrics = compute_metrics(text, cfg["metrics"], genre, active, cfg["lexicon"])
 
-    # 体裁加严：strict 列表里的规则，命中一律按强信号报
+    # 加严只提升已超阈值的 mid 项；依赖语义的 low 候选仍由人工判断。
     strict = set(cfg["genres"].get(genre, {}).get("strict", []))
     strict_bases = {s.split("_")[0] for s in strict}
 
@@ -534,19 +521,15 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
             continue
         rule_hits = scan_lexicon(text, {rule: cfg["lexicon"][rule]}, {rule})
         metric = metrics_by_key.get(rule)
-        if rule_hits and metric and is_strict(rule):
-            metric["flagged"] = True
-            metric["severity"] = "high"
-            metric["threshold"] += "；本体裁命中即加严"
         if metric and metric["flagged"]:
             hits.extend(rule_hits)
 
     if strict:
         for h in hits:
-            if is_strict(h.rule):
+            if h.sev == "mid" and is_strict(h.rule):
                 h.sev = "high"
         for m in metrics:
-            if m["flagged"] and is_strict(m["key"]):
+            if m["flagged"] and m["severity"] == "mid" and is_strict(m["key"]):
                 m["severity"] = "high"
 
     hits.sort(key=lambda h: h.start)
@@ -561,6 +544,7 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
         "genre": genre,
         "stats": {"chars": chars, "sentences": len(sents), "paragraphs": len(paragraphs(text))},
         "metrics": metrics,
+        "manual_review": {k: v for k, v in cfg.get("manual_rules", {}).items() if k in active},
         "hits": [h.as_dict(text, starts) for h in hits],
         "counts": counts,
         "severity_totals": {
@@ -568,6 +552,8 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
                     sum(1 for m in metrics if m["flagged"] and m["severity"] == "high"),
             "mid": sum(1 for h in hits if h.sev == "mid" and h.rule not in aggregate_rules) +
                    sum(1 for m in metrics if m["flagged"] and m["severity"] == "mid"),
+            "low": sum(1 for h in hits if h.sev == "low" and h.rule not in aggregate_rules) +
+                   sum(1 for m in metrics if m["flagged"] and m["severity"] == "low"),
         },
         "strict": cfg["genres"].get(genre, {}).get("strict", []),
     }
@@ -600,19 +586,23 @@ def render(res: dict, source: str, cfg: dict) -> str:
 
     out.append("\n## 汇总\n")
     tot = res["severity_totals"]
-    out.append(f"🔴 {tot['high']} 处　⚠️ {tot['mid']} 处")
+    out.append(f"🔴 {tot['high']} 项　⚠️ {tot['mid']} 项　💡 {tot['low']} 项（聚合指标按项计数）")
     if res["counts"]:
         top = sorted(res["counts"].items(), key=lambda kv: -kv[1])[:6]
         names = {**{k: v["name"] for k, v in cfg["lexicon"].items()},
                  **{k: v["name"] for k, v in cfg["regex_rules"].items()}}
-        out.append("优先处理：" + "　".join(f"{k} {names.get(k,'')}({v})" for k, v in top))
+        out.append("候选定位：" + "　".join(f"{k} {names.get(k,'')}({v})" for k, v in top))
     if res["strict"]:
         out.append(f"本体裁加严：{', '.join(res['strict'])}")
 
     out.append("\n---\n")
+    if res["manual_review"]:
+        out.append("人工检查（未自动判定通过或失败）：")
+        out.extend(f"- {k}：{v}" for k, v in res["manual_review"].items())
     out.append("脚本只查机械指标，**每一处都要人工复核再改**，会有误伤。")
     out.append("C/R 层只有部分表面模式能机械提示，语义是否成立仍要按 `references/rules.md` 人工判断。")
     out.append("观点、经验和分析类内容尤其要确认是否如实写明判断边界；没有真实不确定性时不要硬加。")
+    out.append("引文、字面用法和作者习惯需结合上下文保留。合理命中不必清零；无命中也不证明事实正确或出自人类。")
     return "\n".join(out)
 
 
@@ -623,7 +613,7 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     ap.add_argument("--patterns", default=None, help="自定义 patterns.json 路径")
     ap.add_argument("--fail-on", choices=["never", "high", "any"], default="never",
-                    help="命中时的退出码策略，默认 never（总是 0）")
+                    help="never 不因命中失败；high 仅高优先项；any 包括 low 候选。输入错误均返回 2")
     args = ap.parse_args()
 
     pfile = Path(args.patterns) if args.patterns else Path(__file__).with_name("patterns.json")
@@ -668,7 +658,7 @@ def main() -> int:
     tot = res["severity_totals"]
     if args.fail_on == "high" and tot["high"] > 0:
         return 1
-    if args.fail_on == "any" and (tot["high"] or tot["mid"]):
+    if args.fail_on == "any" and any(tot.values()):
         return 1
     return 0
 

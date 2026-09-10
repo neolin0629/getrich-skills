@@ -1,23 +1,23 @@
 ---
 name: gr-search
 description: >
-  联网搜索工具 - 同时调用豆包搜索和 Parallel，去重融合后按 token 预算压缩输出。
-  豆包为主（中文站点、火山如意结构化卡片、行业/站点/时效过滤），Parallel 为补充（英文与长尾信源）。
+  联网搜索工具 - 同时调用豆包搜索和 Parallel，去重融合后按字符预算压缩输出。
+  双源默认并行、等权融合：豆包提供中文站点、火山如意卡片及行业过滤，Parallel 补充英文与长尾信源。
   支持网页搜索、图片搜索、正文抓取。全量结果落盘 JSON 供追问。
   触发词：搜索、查一下、联网搜、search、找资料、最新消息、豆包搜索、gr-search。
 allowed-tools: Bash(python3:*), Bash(parallel-cli:*)
 metadata:
-  version: "1.0.0"
+  version: "1.2.2"
 ---
 
 # gr-search —— 双路融合联网搜索
 
-一次调用打两个源，URL 归一化 + 正文近重复去重后按 RRF 融合排序，
-按 token 预算压缩输出，**全量结果落盘 JSON**：
+默认并行调用两个源，同 URL 合并后，仅对标题与正文完全一致的跨 URL 结果去重，再按等权 RRF 融合排序，
+按字符预算选取与问题相关的正文段落，**全量结果落盘 JSON**：
 
-- **豆包搜索 Custom 版**（主）：中文站点覆盖好，有权威度分级、相关度分数、发布时间、
+- **豆包搜索 Custom 版**：中文站点覆盖好，有权威度分级、相关度分数、发布时间、
   正文 markdown，以及火山如意结构化卡片（天气/汇率/油价/火车/高考等直接给结构化答案）
-- **Parallel**（补充）：英文与长尾信源覆盖好，excerpt 质量高
+- **Parallel**：英文与长尾信源覆盖好，excerpt 质量高
 
 ## 何时用
 
@@ -62,6 +62,8 @@ python3 "$SKILL/scripts/gr_search.py" search "豆包搜索计费" \
 | 只要权威来源 | `--authoritative`（**仅豆包**，且会过滤掉如意卡片） |
 | 只要可引用结果 | `--need-url`（同样会过滤掉如意卡片，默认不开） |
 | 图片搜索 | `--type image`（**仅豆包**） |
+| 节省卡片查询调用 | `--card-shortcircuit`：先查豆包，命中卡片后不调 Parallel；未命中时串行等待两路 |
+| 覆盖旧配置、强制并行 | `--force-all`（仅在双源查询时调用两路，单源/图片查询仍尊重来源选择） |
 | 只用一个源 | `--source doubao` 或 `--source parallel` |
 | 结果不新鲜 | `--no-cache`（只跳过 gr-search 本地磁盘缓存，**不保证**绕过上游自己的服务端缓存） |
 
@@ -87,10 +89,11 @@ python3 "$SKILL/scripts/gr_search.py" fetch "https://www.volcengine.com/docs/877
 ## 追问已有结果
 
 每次搜索都会打印 `全量结果: <路径>`。需要某条结果的完整正文、图片列表或原始 API 响应时，
-直接读那个 JSON，**不要重新搜索**。结构为：
+优先读那个 JSON，避免为已取得的内容重复搜索。用户要求新搜索、结果已过时或查询范围改变时，
+重新搜索并按需带 `--no-cache`。结构为：
 
 ```text
-{ _notice, query, doubao_query, objective, keywords, session_id, timestamp, stats, errors,
+{ _notice, query, doubao_query, objective, keywords, session_id, timestamp, diagnostics, stats, errors,
   cards[], docs[{url,title,body,site,publish,authority,sources,also_urls,images}], raw{} }
 ```
 
@@ -104,15 +107,36 @@ python3 "$SKILL/scripts/gr_search.py" fetch "https://www.volcengine.com/docs/877
 `session_id` 是那次 search 调用 Parallel 时用的会话 ID。对同一批链接接着 `fetch` 时带上
 `--session-id <该值>`，可让 Parallel 把 search 和 extract 串成同一个任务上下文（官方最佳实践）。
 
+### 证据不足时的补证
+
+先列出问题尚未覆盖的事实，例如参数默认值、例外条件或某日期的状态。按这些缺口检查
+落盘 JSON 的 `docs[].body`；段落选取不代表正文完整，只有标题、链接或表头不能支持结论。
+读取时保留条款相邻的限定说明、表头与日期，代码保留完整块。不要把终端二次截断造成的缺失
+当成上游没查到。
+关键词定位应检查相关来源中的全部匹配；只看标题的前几个命中或正文前缀，不能据此断言
+完整 JSON 缺少该事实。
+
+当次 JSON 仍缺证据，或来源对同一适用范围给出冲突结论，再对最相关的原始来源做 `fetch`：
+将缺失事实或需要核对的冲突写进 `--objective`，
+并复用 `session_id`。没有落盘文件时可直接补抓已知 URL。如果返回的仍是导航、空壳或无关摘录，
+该调用不算完成补证；可换对应章节或另一原始来源，不能只凭 URL 声称已经核实。
+
+普通问答的一轮补证默认最多 **2 次额外联网调用**（搜索或抓取），最多抓 **2 个 URL**，
+累计 `--max-chars` 不超过 **12000**。先分配调用和字符预算，覆盖所需事实后立即停止；
+用完仍有缺口则明确哪些事实未核实。用户明确要求更深入研究时按任务范围调整。
+涉及实况、预报、发布计划或旧版规则，分别核对日期与适用范围，不拼成同一结论。
+
 ## 输出约定
 
-- `双源` —— 该结果被豆包和 Parallel 同时召回，是较强的可信度信号。
-  但**实测很少出现**：一轮 132 条结果里一条都没有，两个源的召回几乎完全不重叠
-  （豆包偏聚合站与转载，Parallel 偏一手源与外文站）。别把它当作筛选门槛，
-  没有「双源」不代表结果不可信
+- `双源` —— 同一 URL 或标题、正文完全相同的页面被两个检索系统召回，不等于两个独立事实来源。
+  排序只累加两源 RRF 贡献，不额外奖励；不要将双源作为可信度门槛。
 - `如意·<类型>` 与顶部的「命中火山如意结构化直答」—— 结构化直答，优先采信
 - `亦见:` —— 被合并的重复 URL
-- `非常权威` / `正常权威` —— 来自豆包的站点权威度分级
+- `非常权威` / `正常权威` —— 来自豆包的站点权威度分级，仅展示，不直接跨源加分。
+- 排名使用统一的一起始名次，相关度分数也仅展示；新鲜度按基础分的比例调整，非法及明显未来日期不获奖励。
+- `diagnostics`（JSON）记录排序版本、时效判定、融合参数、调度方式以及每源耗时/缓存/失败状态，便于比较同一批候选。
+- 正文在单篇页面内按问题、`--objective` 与 `--pq` 选段，并保留来源顺序；`[…中间内容省略…]`
+  表示片段之间有删节。这不是全文，也不是事实核验；缺少限定条件时走上述补证流程。
 
 ## 内容边界
 
@@ -139,6 +163,19 @@ python3 "$SKILL/scripts/gr_search.py" fetch "https://www.volcengine.com/docs/877
 python3 "$SKILL/scripts/gr_search.py" config doctor
 ```
 
+### 从旧版本升级
+
+旧配置会覆盖新版默认值；只更新技能文件不会自动修改已保存的权重或短路开关。
+以下命令先预览，再显式应用：
+
+```bash
+python3 "$SKILL/scripts/gr_search.py" config migrate-defaults
+python3 "$SKILL/scripts/gr_search.py" config migrate-defaults --apply
+```
+
+仅将两源权重设为 `1.0`、`card_shortcircuit` 设为 `false`；保留密钥、路径和其他设置。
+如需继续保留自定义权重或省调用策略，不执行应用命令。无需清除旧 HTTP 缓存：读取缓存时会重新映射名次并排序。
+
 ### API Key
 
 **不要让用户把 API Key 发到对话里，也不要代替用户输入。**
@@ -160,8 +197,12 @@ python3 "$SKILL/scripts/gr_search.py" config set-key doubao
 ### 可调项
 
 `config.json` 里可以固定默认行为：输出档位 `output.profile`、融合权重
-`fusion.weight_doubao` / `weight_parallel`、去重阈值 `fusion.dedup_jaccard`、
+`fusion.weight_doubao` / `weight_parallel`、
 缓存 TTL `cache.ttl_seconds` 与 `cache.fresh_ttl_seconds`、卡片短路开关 `card_shortcircuit`。
+
+旧配置 `fusion.dedup_jaccard` 保留读取兼容性，但不再控制跨 URL 去重；从 1.2.2 起只合并
+标题与完整正文严格相同的结果，标点、大小写、代码缩进或否定词有差异都会分别保留。
+诊断字段 `dedup_mode` 为 `exact_body`，兼容字段 `effective_dedup_threshold` 固定为 `1.0`。
 
 两个容易配错的项：`parallel.api_key_env` 只决定**从哪个环境变量读**密钥
 （注入 `parallel-cli` 时固定用官方的 `PARALLEL_API_KEY`）；`parallel.client_model`
