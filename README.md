@@ -25,7 +25,7 @@ npx skills use neolin0629/getrich-skills --skill gr-search --agent claude-code
 | --- | --- |
 | `gr-search` | 同时调用豆包搜索和 Parallel，去重融合后按字符预算选取相关段落，支持图片搜索与正文抓取 |
 | `gr-chinese-typography-rules` | 检查或统一中文排版，覆盖中英文空格、标点、引号、数字、日期和金融表达，附机械自检脚本 |
-| `gr-content-ai-avoid` | 按 6 个层级、39 条规则规避中文写作中的 AI 指纹，并提供脚本自检 |
+| `gr-content-ai-avoid` | 保留事实与作者风格，按 6 层、39 条规则减少套话，提供脚本候选与人工复核 |
 | `gr-ob-fix-color-tags` | 用全角括号包裹 Obsidian `prompts/` 目录中的十六进制颜色代码，避免被识别为标签 |
 | `gr-ob-rm-prompts-formatter` | 批量删除 Obsidian `prompts/` 目录中 Markdown 文件开头的 YAML frontmatter |
 
