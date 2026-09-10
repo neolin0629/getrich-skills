@@ -5,17 +5,16 @@ gr-chinese-typography-rules 机械自检脚本。
 
 只报告，不改写。分两级：
 
-    error —— 确定性问题，几乎不会误判（ASCII 直引号、中文里的半角标点、标点堆叠……）
+    error —— 按本技能默认风格可明确定位的问题，仍需确认保护边界
     warn  —— 需要语境判断的候选问题（单位空格、引号风格、中英文粘连……），人工确认后再改
 
-代码块（围栏闭合要求同字符同长度，嵌套展示的短围栏示例不会提前闭合）、
-行内代码（支持多反引号包裹）、URL、Markdown 链接目标（含一层括号嵌套；可见文字仍检查）、
-HTML 标签、frontmatter、公式、引用块前导 `>`、单 Tab 缩进代码块一律屏蔽，不参与检查。
+屏蔽常见 Markdown 代码、链接目标、引用块、frontmatter、HTML 标签与注释、显式公式。
+这不是完整 Markdown 解析器；普通引号中的原话、未标记配置、命令与标识符仍需人工识别。
 输入统一按 LF 处理（自动归一化 CRLF）。
 
 用法：
     python3 check_typography.py 稿子.md
-    python3 check_typography.py 稿子.md --level error   # 只看确定性问题
+    python3 check_typography.py 稿子.md --level error   # 只看默认规则问题
     python3 check_typography.py 稿子.md --json
     python3 check_typography.py 稿子.md --fail-on error # 有 error 时退出码 1
     echo "文本" | python3 check_typography.py -
@@ -46,23 +45,15 @@ URL_CHARS = r"A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%"
 MASK_CHAR = ""
 
 MASK_PATTERNS = [
-    re.compile(r"\A---\n.*?\n---\n", re.S),          # frontmatter
-    # 围栏代码块：闭合行要求与开头相同的围栏字符、相同长度，
-    # 这样四反引号围栏里嵌套展示的三反引号示例不会被当成提前闭合。
-    re.compile(r"^([ \t]{0,3})(`{3,}|~{3,})[^\n]*\n(?:.*\n)*?^\1\2[ \t]*$", re.M),
-    re.compile(r"\$\$.*?\$\$", re.S),                 # 块级公式
-    re.compile(r"(`+)[^\n]*?\1"),                      # 行内代码（支持多反引号包裹，反引号数量需配对）
-    re.compile(r"\$[^$\n]+\$"),                       # 行内公式
+    re.compile(r"<!--.*?(?:-->|\Z)", re.S),
+    re.compile(r"(?<!\\)\$\$.*?(?<!\\)\$\$", re.S),
+    re.compile(r"(?<![\\$])\$(?!\s)(?:[^$\n]*?[^\s\\$])\$(?![\d$])"),
+    re.compile(r"\\\(.*?\\\)|\\\[.*?\\\]", re.S),
     re.compile(rf"https?://[{URL_CHARS}]+"),           # 裸 URL（不吞后面的中文正文）
-    re.compile(r"<[^>\n]{1,120}>"),                   # HTML 标签
-    re.compile(r"^(?:[ ]{4,}|[ ]{0,3}\t)\S.*$", re.M),  # 缩进代码块（含单个 Tab 缩进）
+    re.compile(r"</?[A-Za-z][^>\n]*>|<![A-Z][^>\n]*>"),
+    re.compile(r"^(?:[ ]{4,}|[ ]{0,3}\t)[^\n]*$", re.M),
+    re.compile(r"^[ ]{0,3}\[[^]\n]+\]:[^\n]*(?:\n[ \t]+[\"'(][^\n]*)?", re.M),
 ]
-
-# Markdown 链接 / 图片：只屏蔽目标 `(...)`（支持一层括号嵌套），可见文字 `[...]` 仍参与检查
-LINK_TARGET = re.compile(r"!?\[[^\]\n]*\](\((?:[^()\n]|\([^()\n]*\))*\))")
-
-# 每行开头的引用标记 `>`（可带前导 1-3 个空格），不是数学比较符号
-BLOCKQUOTE_MARK = re.compile(r"^([ ]{0,3})>[ \t]?", re.M)
 
 ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
@@ -81,20 +72,95 @@ def blank_out(text: str, pattern: re.Pattern) -> str:
     return "".join(out)
 
 
-def blank_group(text: str, pattern: re.Pattern, group: int) -> str:
-    """只屏蔽指定捕获组，其余匹配内容（如链接可见文字）保留参与检查。"""
+def mask_blocks(text: str) -> str:
+    """保守屏蔽块结构；未闭合围栏延伸到文件末尾。"""
     out = list(text)
-    for m in pattern.finditer(text):
-        blank_span(out, m.start(group), m.end(group))
+    fence = None
+    frontmatter = False
+    quote = False
+    offset = 0
+    for index, line in enumerate(text.splitlines(keepends=True)):
+        body = line.rstrip("\r\n")
+        if index == 0 and body.lstrip("\ufeff") == "---":
+            frontmatter = True
+        if frontmatter:
+            blank_span(out, offset, offset + len(line))
+            if index > 0 and body in ("---", "..."):
+                frontmatter = False
+        elif fence:
+            blank_span(out, offset, offset + len(line))
+            if re.fullmatch(r"[ ]{0,3}" + re.escape(fence[0]) + "{" + str(fence[1]) + r",}[ \t]*", body):
+                fence = None
+        else:
+            opener = re.match(r"[ ]{0,3}(`{3,}|~{3,})(.*)$", body)
+            if opener and not (opener[1][0] == "`" and "`" in opener[2]):
+                fence = (opener[1][0], len(opener[1]))
+                blank_span(out, offset, offset + len(line))
+            else:
+                if not body.strip():
+                    quote = False
+                if re.match(r"[ ]{0,3}>", body):
+                    quote = True
+                if quote:
+                    blank_span(out, offset, offset + len(line))
+        offset += len(line)
+    return "".join(out)
+
+
+def mask_inline_code(text: str) -> str:
+    out = list(text)
+    runs = list(re.finditer(r"`+", text))
+    next_same = {}
+    closing = {}
+    for index in range(len(runs) - 1, -1, -1):
+        length = len(runs[index][0])
+        closing[index] = next_same.get(length)
+        next_same[length] = index
+    index = 0
+    while index < len(runs):
+        end = closing[index]
+        if end is None:
+            index += 1
+        else:
+            blank_span(out, runs[index].start(), runs[end].end())
+            index = end + 1
+    return "".join(out)
+
+
+def mask_link_targets(text: str) -> str:
+    """保留标签，屏蔽嵌套及转义括号组成的目标和可选标题。"""
+    out = list(text)
+    for match in re.finditer(r"\]\(", text):
+        start = match.end() - 1
+        depth = 1
+        pos = start + 1
+        quote = None
+        while pos < len(text) and depth:
+            if text[pos] == "\\":
+                pos += 2
+                continue
+            if quote:
+                if text[pos] == quote:
+                    quote = None
+            elif text[pos] in "\"'" and text[pos - 1].isspace():
+                quote = text[pos]
+            elif text[pos] == "<" and pos == start + 1:
+                quote = ">"
+            elif text[pos] == "(":
+                depth += 1
+            elif text[pos] == ")":
+                depth -= 1
+            pos += 1
+        if depth == 0:
+            blank_span(out, start, pos)
     return "".join(out)
 
 
 def preprocess(raw: str) -> str:
-    text = raw
-    text = blank_group(text, LINK_TARGET, 1)
+    text = mask_inline_code(mask_blocks(raw))
+    text = mask_link_targets(text)
     for pat in MASK_PATTERNS:
         text = blank_out(text, pat)
-    text = blank_out(text, BLOCKQUOTE_MARK)
     return text
 
 
@@ -184,17 +250,17 @@ RULES: list[tuple[str, str, re.Pattern, str, str]] = [
     ),
     (
         "fullwidth-colon-time",
-        "error",
+        "warn",
         re.compile(r"\d[ \t]*：[ \t]*\d"),
-        "时间用了全角冒号",
-        "时间用半角冒号，如 15:00（SKILL 3.8）",
+        "数字之间使用了全角冒号，可能是时间或比例",
+        "确认是时间后改成半角冒号，如 15:00；比例等语境另行判断（SKILL 3.8）",
     ),
     (
         "pct-space",
-        "error",
-        re.compile(r"\d[ \t]+[%°‰]"),
+        "warn",
+        re.compile(r"\d[ \t]+(?:[%‰]|°(?![CF]))"),
         "数字与 % / ° 之间有空格",
-        "紧贴数字：15%、33°（SKILL 3.1）",
+        "默认紧贴数字：15%、33°；25 °C 属温度单位，不套用角度规则（SKILL 3.1）",
     ),
     (
         "fullwidth-digit",
@@ -227,14 +293,14 @@ RULES: list[tuple[str, str, re.Pattern, str, str]] = [
     (
         "range-unit",
         "warn",
-        re.compile(r"\d(?![%°])[ \t]*[–—][ \t]*\d+[ \t]*(%|[A-Za-z]{1,4}\b)"),
-        "区间可能只有右端带单位",
-        "两端都要带单位或百分号：67%–89%（SKILL 3.6）",
+        re.compile(r"\d[ \t]*[–—][ \t]*\d+(?:\.\d+)?[ \t]*%"),
+        "百分比区间可能只有右端带百分号",
+        "百分比建议两端明确：67%–89%；3–5 kg 等共用单位可保留，不补猜缺失单位（SKILL 3.6）",
     ),
     (
         "math-space",
         "warn",
-        re.compile(rf"(?<=[{CJK}\w])[=<>≤≥≈≠±]|[=<>≤≥≈≠±](?=[\w{CJK}])"),
+        re.compile(rf"(?<=[{CJK}\w])[=<>≤≥≈≠]|[=<>≤≥≈≠](?=[\w{CJK}])"),
         "比较符号前后没有空格",
         "数学符号前后加半角空格：夏普 > 1.5（financial-notation 一）",
     ),
@@ -248,14 +314,14 @@ RULES: list[tuple[str, str, re.Pattern, str, str]] = [
     (
         "cjk-md-space",
         "warn",
-        re.compile(rf"(?<=[{CJK}])[ \t]+\*\*|\*\*[ \t]+(?=[{CJK}])"),
+        re.compile(rf"(?<=[{CJK}])[ \t]+\*\*(?=[{CJK}])|(?<=[{CJK}])\*\*[ \t]+(?=[{CJK}])"),
         "Markdown 加粗标记与中文之间有空格",
         "格式标记不算英文，不加空格（SKILL 3.1）",
     ),
     (
         "thousands",
         "warn",
-        re.compile(r"(?<![\d,.])\d{5,}(?![\d,.])"),
+        re.compile(r"(?<![A-Za-z0-9_,.])\d{5,}(?![A-Za-z0-9_,.])"),
         "5 位以上数字未加千位分隔符",
         "加半角逗号：3,000,000；年份、编号、股票代码不加（financial-notation 四）",
     ),
@@ -287,7 +353,7 @@ def consistency_checks(masked: str) -> list[dict]:
             "fix": "全文统一到一种（SKILL 3.3）",
         })
 
-    spaced = re.findall(r"\d[ \t](KB|MB|GB|TB|Hz|MHz|GHz|Gbps|Mbps|kg|km|ms)\b", masked)
+    spaced = re.findall(r"\d[ \t]+(KB|MB|GB|TB|Hz|MHz|GHz|Gbps|Mbps|kg|km|ms)\b", masked)
     glued = re.findall(r"\d(KB|MB|GB|TB|Hz|MHz|GHz|Gbps|Mbps|kg|km|ms)\b", masked)
     both = set(spaced) & set(glued)
     if both:
@@ -348,7 +414,7 @@ def main() -> int:
                     help="只显示指定级别，默认全部")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     ap.add_argument("--fail-on", choices=["error", "warn"], default=None,
-                    help="命中该级别时退出码为 1")
+                    help="error：有 error 时返回 1；warn：有 error 或 warn 时返回 1")
     args = ap.parse_args()
 
     raw = sys.stdin.read() if args.path == "-" else Path(args.path).read_text(encoding="utf-8")
@@ -363,15 +429,15 @@ def main() -> int:
     fail_warn = args.fail_on == "warn" and bool(all_findings)
     will_fail = fail_error or fail_warn
     # --fail-on 命中的等级被 --level 过滤掉时，触发原因不在下方列表里，需要单独说明
-    hidden_trigger = will_fail and args.level != "all" and not any(
-        f["level"] == args.fail_on for f in findings
+    hidden_trigger = will_fail and not any(
+        args.fail_on == "warn" or f["level"] == "error" for f in findings
     )
 
     note = None
     if hidden_trigger:
         note = (
-            f"--fail-on {args.fail_on} 命中，但 --level {args.level} 未展示该级别的详情，"
-            f"去掉 --level 或改成 --level {args.fail_on} 查看具体位置。"
+            f"--fail-on {args.fail_on} 命中，但 --level {args.level} 隐藏了触发项，"
+            "去掉 --level 查看具体位置。"
         )
 
     if args.json:
@@ -385,7 +451,7 @@ def main() -> int:
     else:
         n_err = sum(1 for f in findings if f["level"] == "error")
         n_warn = len(findings) - n_err
-        print(f"{args.path}：{n_err} 处确定性问题，{n_warn} 处候选问题\n")
+        print(f"{args.path}：{n_err} 处默认规则问题，{n_warn} 处候选问题\n")
         for f in findings:
             loc = f"{f['line']}:{f['col']}" if f["line"] else "全文"
             print(f"{LEVEL_ICON[f['level']]} {loc}  [{f['rule']}] {f['why']}")
