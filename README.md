@@ -104,6 +104,19 @@ uv run --python "$(which python3)" --with pytest --with click pytest tests/ -q
 uv run --python "$(which python3)" --with pytest --with click python tests/gr-search/mutants.py
 ```
 
+## 感谢
+
+`gr-content-ai-avoid` 借鉴了：
+
+- [lieflat-less-ai-tone](https://github.com/larashero3-dotcom/lieflat-less-ai-tone)
+- [humanizer](https://github.com/blader/humanizer)
+- [Humanizer-zh](https://github.com/op7418/Humanizer-zh)
+
+`gr-chinese-typography-rules` 借鉴了：
+
+- [document-style-guide](https://github.com/ruanyf/document-style-guide)
+- [chinese-style-guide](https://github.com/RightCapitalHQ/chinese-style-guide)
+
 ## License
 
 MIT
