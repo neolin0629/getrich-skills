@@ -1,0 +1,100 @@
+{
+  "purpose": "人工或固定模型盲测验收，不是本次已经通过的自动化改写结果",
+  "execution_status": "not_run",
+  "cases": [
+    {
+      "id": "keep-natural",
+      "input": "今天整理完数据，明天核对来源。",
+      "acceptance": "原文自然时允许逐字不改；不得为了展示修改而重写。",
+      "protected_information": [
+        "今天",
+        "明天"
+      ]
+    },
+    {
+      "id": "keep-enumeration",
+      "input": "流程包括采集、存储、展示。",
+      "acceptance": "不得将完整集合压成只剩端点的范围。",
+      "protected_information": [
+        "采集",
+        "存储",
+        "展示"
+      ]
+    },
+    {
+      "id": "keep-qualifiers",
+      "input": "仅在低换手样本中，结果可能略有改善。",
+      "acceptance": "保留适用范围、可能性和程度，三者不是重复填充。",
+      "protected_information": [
+        "仅在低换手样本中",
+        "可能",
+        "略有"
+      ]
+    },
+    {
+      "id": "keep-condition",
+      "input": "当成交量不足时，这个方法可能失效。",
+      "acceptance": "不得删除条件并改为成交量已经不足的事实断言。",
+      "protected_information": [
+        "成交量不足",
+        "可能失效"
+      ]
+    },
+    {
+      "id": "keep-statistics",
+      "input": "该差异未达到 5% 显著性水平，p 值为 0.08。",
+      "acceptance": "数字、否定及统计含义全部保留。",
+      "protected_information": [
+        "未达到",
+        "5%",
+        "0.08"
+      ]
+    },
+    {
+      "id": "keep-inference",
+      "input": "样本中留存率上升。作者认为，这可能与流程调整有关。",
+      "acceptance": "归因仍是作者推断，不得合并成已确立的因果关系。",
+      "protected_information": [
+        "作者认为",
+        "可能"
+      ]
+    },
+    {
+      "id": "keep-author-judgment",
+      "input": "我认为，这次变化具有里程碑意义。",
+      "acceptance": "风格修改不能静默删掉作者判断；依据疑点可单列。",
+      "protected_information": [
+        "我认为",
+        "里程碑"
+      ]
+    },
+    {
+      "id": "keep-exact-record",
+      "input": "日志记录的延迟是 1.700 秒，不是估算值。",
+      "acceptance": "不得把真实精度改成“大约两秒”。",
+      "protected_information": [
+        "1.700",
+        "不是估算值"
+      ]
+    },
+    {
+      "id": "keep-layout",
+      "input": "## 操作步骤\n\n1. 保存原始数据。\n2. 核对日期。\n3. 备份结果。",
+      "acceptance": "最小改写保留标题层级、步骤次序及列表结构。",
+      "protected_information": [
+        "## 操作步骤",
+        "1.",
+        "2.",
+        "3."
+      ]
+    },
+    {
+      "id": "keep-quote",
+      "input": "原文如下：\n\n> 这不是偶然，而是记录中的真实结果。\n\n这里只讨论这句话的表达。",
+      "acceptance": "块引用中的原文逐字保留。",
+      "protected_information": [
+        "> 这不是偶然，而是记录中的真实结果。"
+      ]
+    }
+  ]
+}

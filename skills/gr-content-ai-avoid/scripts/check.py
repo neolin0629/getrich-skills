@@ -40,8 +40,6 @@ EMOJI_RE = re.compile(
     "]"
 )
 
-SENT_END = "。！？!?；;\n"
-
 
 # --------------------------------------------------------------------------- #
 # 文本预处理
@@ -52,7 +50,7 @@ def blank_out(text: str, pattern: re.Pattern) -> str:
     out = list(text)
     for m in pattern.finditer(text):
         for i in range(m.start(), m.end()):
-            if out[i] != "\n":
+            if out[i] not in "\r\n":
                 out[i] = " "
     return "".join(out)
 
@@ -64,17 +62,124 @@ def preserve_link_labels(text: str) -> str:
     for m in pattern.finditer(text):
         label_start, label_end = m.span(1)
         for i in range(m.start(), m.end()):
-            if not label_start <= i < label_end and out[i] != "\n":
+            if not label_start <= i < label_end and out[i] not in "\r\n":
                 out[i] = " "
     return "".join(out)
+
+
+def mask_ranges(text: str, ranges: list[tuple[int, int]]) -> str:
+    """等长屏蔽；保留 LF/CRLF，所有定位均指向原文字符偏移。"""
+    out = list(text)
+    for start, end in ranges:
+        for i in range(start, end):
+            if out[i] not in "\r\n":
+                out[i] = " "
+    return "".join(out)
+
+
+def mask_fences(text: str) -> str:
+    """支持常见 Markdown 围栏；闭合符同类且不短于开符，未闭合延续至 EOF。"""
+    ranges, offset = [], 0
+    opener = None
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if opener is not None:
+            start, char, width = opener
+            if re.fullmatch(r" {0,3}" + re.escape(char) + "{" + str(width) + r",}[ \t]*", body):
+                ranges.append((start, offset + len(line)))
+                opener = None
+        else:
+            match = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", body)
+            if match:
+                fence, info = match.groups()
+                if fence[0] != "`" or "`" not in info:
+                    opener = (offset, fence[0], len(fence))
+        offset += len(line)
+    if opener is not None:
+        ranges.append((opener[0], len(text)))
+    return mask_ranges(text, ranges)
+
+
+def mask_blockquotes(text: str) -> str:
+    """保护显式块引用及首段懒续行；复杂嵌套和行内引语仍须人工复核。"""
+    ranges, offset, in_quote = [], 0, False
+    block_start = re.compile(r"^ {0,3}(?:#{1,6}(?:\s|$)|[-+*]\s|\d+[.)]\s|`{3,}|~{3,}|\|)")
+    for line in text.splitlines(keepends=True):
+        explicit = re.match(r"^ {0,3}>", line)
+        if explicit:
+            in_quote = True
+        elif not line.strip() or block_start.match(line) or re.fullmatch(r" {0,3}(?:[-*_] *){3,}\s*", line):
+            in_quote = False
+        if in_quote:
+            ranges.append((offset, offset + len(line)))
+        offset += len(line)
+    return mask_ranges(text, ranges)
+
+
+def prose_view(text: str) -> str:
+    """句段指标的散文正文视图；不改变词表/格式规则使用的可见文本视图。"""
+    lines = text.splitlines(keepends=True)
+    excluded: set[int] = set()
+    heading = re.compile(r"^ {0,3}#{1,6}(?:\s|$)")
+    list_item = re.compile(r"^([ \t]*)(?:[-+*]|\d+[.)、])[ \t]+")
+    setext = re.compile(r" {0,3}(?:=+|-+)[ \t]*[\r\n]*")
+    thematic = re.compile(r" {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})[\r\n]*")
+    delimiter = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+    list_indent = None
+    after_blank = False
+    for i, line in enumerate(lines):
+        if not line.strip():
+            after_blank = True
+            continue
+        # 分隔线优先于列表标记；它会结束列表，不能吞掉后面的正文。
+        # setext 下划线修饰整个前置段落，标题可能含多行软换行。
+        if setext.fullmatch(line) or thematic.fullmatch(line):
+            if setext.fullmatch(line):
+                j = i - 1
+                while j >= 0 and lines[j].strip() and j not in excluded:
+                    excluded.add(j)
+                    j -= 1
+            excluded.add(i)
+            list_indent = None
+            after_blank = False
+            continue
+        item = list_item.match(line)
+        if item:
+            list_indent = len(item.group(0).expandtabs(4))
+            excluded.add(i)
+            after_blank = False
+            continue
+        if list_indent is not None:
+            indent = len(line[:len(line) - len(line.lstrip())].expandtabs(4))
+            if indent >= list_indent or (not after_blank and not heading.match(line) and not line.lstrip().startswith("|")):
+                excluded.add(i)
+                continue
+            list_indent = None
+        after_blank = False
+        if heading.match(line) or line.lstrip().startswith("|"):
+            excluded.add(i)
+        if delimiter.match(line):
+            excluded.add(i)
+            if i:
+                excluded.add(i - 1)
+            j = i + 1
+            while j < len(lines) and lines[j].strip() and "|" in lines[j]:
+                excluded.add(j)
+                j += 1
+    ranges, offset = [], 0
+    for i, line in enumerate(lines):
+        if i in excluded:
+            ranges.append((offset, offset + len(line)))
+        offset += len(line)
+    return mask_ranges(text, ranges)
 
 
 def preprocess(raw: str) -> str:
     """屏蔽非正文区域，并保留普通链接的可见标签文本。偏移保持不变。"""
     text = raw
     text = blank_out(text, re.compile(r"\A---\r?\n.*?\r?\n---(?:\r?\n|\Z)", re.S))
-    text = blank_out(text, re.compile(r"```.*?```", re.S))
-    text = blank_out(text, re.compile(r"~~~.*?~~~", re.S))
+    text = mask_fences(text)
+    text = mask_blockquotes(text)
     text = blank_out(text, re.compile(r"`[^`\n]+`"))
     text = blank_out(text, re.compile(r"!\[[^\]\n]*\]\([^)\n]*\)"))
     text = preserve_link_labels(text)
@@ -111,21 +216,16 @@ def snippet(text: str, start: int, end: int, pad: int = 14) -> str:
 
 
 def split_sentences(text: str) -> list[tuple[int, str]]:
-    """返回 [(起始偏移, 句子文本)]，只保留含中文/字母数字的句子。"""
-    out, buf, start = [], [], 0
-    for i, ch in enumerate(text):
-        if not buf:
-            start = i
-        buf.append(ch)
-        if ch in SENT_END:
-            s = "".join(buf).strip()
-            if re.search(r"[一-鿿A-Za-z0-9]", s):
-                out.append((start, s))
-            buf = []
-    if buf:
-        s = "".join(buf).strip()
-        if re.search(r"[一-鿿A-Za-z0-9]", s):
-            out.append((start, s))
+    """按句末标点和空行切分；普通 Markdown 软换行不单独成为一句。"""
+    out, start = [], 0
+    boundaries = list(re.finditer(r"[。！？!?；;]+|\r?\n[ \t\r]*\n", text))
+    ends = [m.end() for m in boundaries] + [len(text)]
+    for end in ends:
+        chunk = text[start:end]
+        sentence = chunk.strip()
+        if re.search(r"[一-鿿A-Za-z0-9]", sentence):
+            out.append((start + len(chunk) - len(chunk.lstrip()), sentence))
+        start = end
     return out
 
 
@@ -261,6 +361,8 @@ def scan_regex_rules(text: str, rules: dict, active: set[str], chars: int) -> li
             n = cfg.get("tail_chars", 200)
             base_off = body_offsets[-n] if len(body_offsets) > n else 0
             region = text[base_off:]
+        elif scope == "prose":
+            region, base_off = prose_view(text), 0
         else:
             region, base_off = text, 0
 
@@ -389,10 +491,11 @@ def scan_empty_headers(text: str, active: set[str]) -> list[Hit]:
 
 def compute_metrics(text: str, cfg_all: dict, genre: str, active: set[str],
                     lexicon: dict) -> list[dict]:
-    sents = split_sentences(text)
+    prose = prose_view(text)
+    sents = split_sentences(prose)
     lens = [content_len(s) for _, s in sents]
     lens = [n for n in lens if n > 0]
-    paras = paragraphs(text)
+    paras = paragraphs(prose)
     chars = content_len(text)
     k = max(chars, 1) / 1000.0
     rows = []
@@ -407,8 +510,9 @@ def compute_metrics(text: str, cfg_all: dict, genre: str, active: set[str],
         mean = sum(lens) / len(lens)
         sd = math.sqrt(sum((x - mean) ** 2 for x in lens) / len(lens))
         cv = sd / mean if mean else 0.0
-        add("S2", "句长变异系数", round(cv, 3), f"≥ {c.get('warn_below', 0.35)}",
-            cv < c.get("warn_below", 0.35), c.get("severity", "low"), c.get("hint", ""))
+        add("S2", "句长变异系数", round(cv, 3), "仅描述，不设优劣阈值",
+            False, c.get("severity", "low"), c.get("hint", ""))
+        rows[-1].update(informational=True, sample_size=len(lens))
 
     # S7 段末金句率
     c = cfg_all.get("S7_punchline_rate", {})
@@ -422,7 +526,7 @@ def compute_metrics(text: str, cfg_all: dict, genre: str, active: set[str],
             tot += 1
             if ss[-1] < 0.6 * (sum(ss) / len(ss)):
                 hitn += 1
-        if tot:
+        if tot >= c.get("min_paragraphs", 4):
             rate = hitn / tot
             add("S7", "段末短句比例", f"{rate:.0%} ({hitn}/{tot})",
                 f"≤ {c.get('warn_above', 0.6):.0%}", rate > c.get("warn_above", 0.6),
@@ -431,10 +535,13 @@ def compute_metrics(text: str, cfg_all: dict, genre: str, active: set[str],
     # S7 连续短句
     c = cfg_all.get("S7_staccato_run", {})
     if "S7_staccato_run" in active and lens:
-        mx = run = 0
-        for n in lens:
-            run = run + 1 if n <= c.get("max_len", 8) else 0
-            mx = max(mx, run)
+        mx = 0
+        for para in paras:
+            run = 0  # 不把不相邻的段落拼成短句连打。
+            for _, sentence in split_sentences(para):
+                n = content_len(sentence)
+                run = run + 1 if 0 < n <= c.get("max_len", 8) else 0
+                mx = max(mx, run)
         add("S7b", "最长连续短句", mx, f"< {c.get('min_run', 3)}",
             mx >= c.get("min_run", 3), "mid", c.get("hint", ""))
 
@@ -464,14 +571,14 @@ def compute_metrics(text: str, cfg_all: dict, genre: str, active: set[str],
         min_allowed = c.get("min_allowed_count", 0)
         bad = d > c.get("warn_above", 2.0) and cnt > min_allowed
         threshold = f"≤ {c.get('warn_above', 2.0)}" + (f"；总数 ≤ {min_allowed} 豁免" if min_allowed else "")
-        add("W1", "AI 高频词/千字", f"{d:.1f} ({cnt})", threshold,
+        add("W1", "空泛词候选/千字", f"{d:.1f} ({cnt})", threshold,
             bad, "high", "")
 
     # W3 连接词密度
     if "W3" in lexicon and "W3" in active and sents:
         dens = lexicon["W3"].get("density_per_sentence", {})
         thr = dens.get(genre, dens.get("default", 0.25))
-        cnt = count_non_overlapping_matches(text, lexicon["W3"])
+        cnt = count_non_overlapping_matches(prose, lexicon["W3"])
         d = cnt / len(sents)
         min_allowed = lexicon["W3"].get("min_allowed_count", 0)
         bad = d > thr and cnt > min_allowed
@@ -503,7 +610,11 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
 
     # 聚合规则独立扫描，避免跨规则掩码吞掉超标规则的定位。
     hits = scan_lexicon(text, cfg["lexicon"], active - aggregate_rules)
-    hits += scan_regex_rules(text, cfg["regex_rules"], active, chars)
+    regex_hits = scan_regex_rules(text, cfg["regex_rules"], active, chars)
+    # P2 的新提示冒号子规则与已有词表重叠时只保留原定位。
+    p2_hits = [h for h in hits if h.rule == "P2"]
+    hits += [h for h in regex_hits if h.rule != "P2_prompt_colon" or not any(
+        h.start < existing.end and existing.start < h.end for existing in p2_hits)]
     hits += scan_empty_headers(text, active)
 
     metrics = compute_metrics(text, cfg["metrics"], genre, active, cfg["lexicon"])
@@ -519,7 +630,8 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
     for rule in aggregate_rules:
         if rule not in active or rule not in cfg["lexicon"]:
             continue
-        rule_hits = scan_lexicon(text, {rule: cfg["lexicon"][rule]}, {rule})
+        scan_text = prose_view(text) if rule == "W3" else text
+        rule_hits = scan_lexicon(scan_text, {rule: cfg["lexicon"][rule]}, {rule})
         metric = metrics_by_key.get(rule)
         if metric and metric["flagged"]:
             hits.extend(rule_hits)
@@ -534,7 +646,8 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
 
     hits.sort(key=lambda h: h.start)
     starts = line_index(text)
-    sents = split_sentences(text)
+    prose = prose_view(text)
+    sents = split_sentences(prose)
 
     counts: dict[str, int] = {}
     for h in hits:
@@ -542,7 +655,13 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
 
     return {
         "genre": genre,
-        "stats": {"chars": chars, "sentences": len(sents), "paragraphs": len(paragraphs(text))},
+        "stats": {"chars": chars, "prose_chars": content_len(prose),
+                  "sentences": len(sents), "paragraphs": len(paragraphs(prose))},
+        "analysis_scope": {
+            "chars": "可见文本；排除代码、块引用及其他已屏蔽内容",
+            "sentence_metrics": "散文正文；另排除标题、表格和列表；软换行不分句",
+            "limitations": "有限 Markdown 支持；行内引语和复杂嵌套需人工复核",
+        },
         "metrics": metrics,
         "manual_review": {k: v for k, v in cfg.get("manual_rules", {}).items() if k in active},
         "hits": [h.as_dict(text, starts) for h in hits],
@@ -563,7 +682,8 @@ def render(res: dict, source: str, cfg: dict) -> str:
     st, out = res["stats"], []
     out.append("# gr-content-ai-avoid 自检报告\n")
     out.append(f"来源：{source}　体裁：{res['genre']}　"
-               f"正文 {st['chars']} 字 / {st['sentences']} 句 / {st['paragraphs']} 段\n")
+               f"可见文本 {st['chars']} 字；散文正文 {st['prose_chars']} 字 / "
+               f"{st['sentences']} 句 / {st['paragraphs']} 段\n")
 
     out.append("\n## 量化指标\n")
     if res["metrics"]:
@@ -571,6 +691,8 @@ def render(res: dict, source: str, cfg: dict) -> str:
         out.append("| --- | --- | --- | --- |")
         for m in res["metrics"]:
             mark = f"{SEV_ICON.get(m['severity'], '⚠️')} 超标" if m["flagged"] else "✅"
+            if m.get("informational"):
+                mark = "仅描述"
             out.append(f"| {m['key']} {m['name']} | {m['value']} | {m['threshold']} | {mark} |")
     else:
         out.append("（文本过短，跳过量化指标）")
@@ -600,6 +722,7 @@ def render(res: dict, source: str, cfg: dict) -> str:
         out.append("人工检查（未自动判定通过或失败）：")
         out.extend(f"- {k}：{v}" for k, v in res["manual_review"].items())
     out.append("脚本只查机械指标，**每一处都要人工复核再改**，会有误伤。")
+    out.append(res["analysis_scope"]["limitations"] + "；S2 不参与命中与退出码。")
     out.append("C/R 层只有部分表面模式能机械提示，语义是否成立仍要按 `references/rules.md` 人工判断。")
     out.append("观点、经验和分析类内容尤其要确认是否如实写明判断边界；没有真实不确定性时不要硬加。")
     out.append("引文、字面用法和作者习惯需结合上下文保留。合理命中不必清零；无命中也不证明事实正确或出自人类。")
@@ -622,7 +745,7 @@ def main() -> int:
         return 2
     try:
         cfg = json.loads(pfile.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, OSError, UnicodeError) as e:
         print(f"patterns.json 解析失败：{e}", file=sys.stderr)
         return 2
 
@@ -631,6 +754,8 @@ def main() -> int:
         return 2
 
     if args.path == "-":
+        if hasattr(sys.stdin, "reconfigure"):
+            sys.stdin.reconfigure(newline="")
         raw, source = sys.stdin.read(), "stdin"
     else:
         p = Path(args.path)
@@ -641,7 +766,8 @@ def main() -> int:
             print(f"不是普通文件：{p}", file=sys.stderr)
             return 2
         try:
-            raw = p.read_text(encoding="utf-8", errors="replace")
+            with p.open("r", encoding="utf-8", errors="replace", newline="") as stream:
+                raw = stream.read()
         except OSError as e:
             print(f"读取文件失败：{p}：{e}", file=sys.stderr)
             return 2

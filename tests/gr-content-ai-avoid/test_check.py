@@ -140,16 +140,17 @@ def test_directory_input_returns_usage_error_without_traceback():
 
 
 @pytest.mark.parametrize("text, expected", [
-    ("逻辑清晰、执行简单、风险可控。", True),
+    ("逻辑清晰、执行简单、风险可控。", False),
     ("苹果、香蕉、葡萄、橘子。", False),
     ("苹果、香蕉、葡萄、橘子、草莓。", False),
     ("苹果、香蕉、葡萄、橘。", False),
-    ("苹果、香蕉、葡萄\n普通正文。", True),
+    ("苹果、香蕉、葡萄\n普通正文。", False),
 ])
-def test_s1_checks_the_whole_enumeration(text, expected):
+def test_s1_defers_enumerations_to_manual_review(text, expected):
     proc, result = run_check(text, fail_on="high")
     assert bool([h for h in result["hits"] if h["rule"] == "S1"]) is expected
     assert proc.returncode == 0  # 项目数量不能证明刻意凑项。
+    assert "S1" in result["manual_review"]
     assert all(h["severity"] == "low" for h in result["hits"] if h["rule"] == "S1")
 
 
@@ -347,7 +348,8 @@ def test_strict_still_escalates_excess_connectors():
 def test_uniform_sentences_are_advisory_even_in_strict_genre():
     proc, result = run_check('记录已经整理完毕。' * 10, genre='wechat', fail_on='high')
     assert proc.returncode == 0
-    assert metric(result, 'S2')['flagged'] is True
+    assert metric(result, 'S2')['flagged'] is False
+    assert metric(result, 'S2')['informational'] is True
     assert metric(result, 'S2')['severity'] == 'low'
 
 
@@ -358,9 +360,9 @@ def test_genres_allow_short_sentence_sequences(genre):
 
 
 def test_any_includes_low_candidates_but_default_does_not_fail():
-    default, result = run_check('苹果、香蕉、葡萄。')
-    high, _ = run_check('苹果、香蕉、葡萄。', fail_on='high')
-    any_hit, _ = run_check('苹果、香蕉、葡萄。', fail_on='any')
+    default, result = run_check('愿你平安。')
+    high, _ = run_check('愿你平安。', fail_on='high')
+    any_hit, _ = run_check('愿你平安。', fail_on='any')
     assert (default.returncode, high.returncode, any_hit.returncode) == (0, 0, 1)
     assert result['severity_totals'] == {'high': 0, 'mid': 0, 'low': 1}
 
