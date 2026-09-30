@@ -40,6 +40,133 @@ PYTEST_TESTS_FAILED = 1
 # (说明, 文件, 现有代码, 改回缺陷版本)
 # 说明里的编号对应历次审核的 P1/P2/P3 分级。
 MUTANTS: tuple[tuple[str, str, str, str], ...] = (
+    # ---------------- 第八期审核优化（1.2.9）
+    ('P3 R8 中文资料恢复子串匹配', 'render.py',
+     'r"参考资料|参考文献|相关资料|学习资料|官方资料|官方文档|"',
+     'r"资料|参考|文献|"'),
+    ('R8 观察 自动链接与裸网址不再剥离', 'render.py',
+     'text = re.sub(r"<?https?://[^\\s<>]+>?", "", text, flags=re.I)',
+     'text = text'),
+    # ---------------- 第七期审核修复（1.2.8）
+    ('P3 R7 导航关键词又冒充资料短语', 'render.py',
+     '_REFERENCE_HEADING.search(heading_text)',
+     '(_REFERENCE_HEADING.search(heading_text) or re.search(r"related|links|阅读", heading_text, re.I))'),
+    ('P3 R7 推荐排行修饰词不再排除', 'render.py',
+     'and not _REFERENCE_EXCLUDE.search(heading_text)',
+     'and True'),
+    ('P3 R7 链接目标参与章节匹配', 'render.py',
+     'heading_text = _heading_text(unit)',
+     'heading_text = unit'),
+    ('P3 R7 一级资料标题又保护全文', 'render.py',
+     'reference_level == 1 or level <= reference_level',
+     'level <= reference_level'),
+    # ---------------- 第六期审核修复（1.2.7）
+    ('P3 R6 非股价裸年份又按数值', 'fusion.py', 'if not stock_price:\n            return True', 'if "天气" in text or re.search(_EN_BOUND % "weather", text, re.I):\n            return True'),
+    ('P3 R6 阅读章节恢复窄白名单', 'render.py', '_REFERENCE_HEADING.search(heading_text)', 're.search(r"资料|参考|文献|\\b(?:resources?|references?|documentation)\\b", heading_text, re.I)'),
+    # ---------------- 第五期审核修复（1.2.6）
+    ('P2 R5 原文删段退回首次文本匹配', 'render.py',
+     'for unit, start, end in drop:\n        if lines[start:end] == unit.splitlines():\n            removed.update(range(start, end))',
+     'for unit, start, end in drop:\n        for found in range(len(lines)):\n            if lines[found:found + len(unit.splitlines())] == unit.splitlines():\n                removed.update(range(found, found + len(unit.splitlines())))\n                break'),
+    ('P2 R5 拆句误删整个源段落', 'render.py',
+     'if lines[start:end] == unit.splitlines():',
+     'if True:'),
+    ('P2 R5 标题再次贡献导航票数', 'render.py',
+     'if (_heading_level(unit) or unit.startswith',
+     'if (unit.startswith'),
+    ('P2 R5 描述性锚文本不再保护资料', 'render.py',
+     'return bool(lengths) and median(lengths) <= 8',
+     'return bool(lengths)'),
+    ('P2 R5 忽略明确资料章节', 'render.py',
+     'references.append(bool(reference_level))',
+     'references.append(False)'),
+    ('P2 R5 合法SPA路由又被弹窗名单吞掉', 'fusion.py',
+     'if not (fragment.startswith(("/", "!")) or "=" in fragment):',
+     'if fragment.startswith(("/portal", "/login", "/account", "/search", "!/login")) or not (fragment.startswith(("/", "!")) or "=" in fragment):'),
+    ('P3 R5 带空格货币单位不识别', 'fusion.py',
+     'r"^\\s*(?:元|块|美元|港元|点|%|',
+     'r"^(?:元|块|美元|港元|点|%|'),
+    ('P3 R5 中文天气裸年份不再识别', 'fusion.py',
+     'if not stock_price:\n            return True',
+     'if False:\n            return True'),
+    ('P3 R5 明确年字不再识别', 'fusion.py',
+     'if re.match(r"\\s*年", suffix):',
+     'if False:'),
+    ('P3 R5 英文明确年份不再识别', 'fusion.py',
+     'if re.search(r"\\b(?:in|during|for)\\s+(?:the\\s+year\\s+)?$", prefix, re.I):',
+     'if False:'),
+    ('P2 R5 装得下的正文绕过去菜单', 'render.py', '    if query:\n        # 前缀回退及能完整装下', '    if query and sum(len(line) + len(indent) + 1 for line in body.splitlines()) > share:\n        # 前缀回退及能完整装下'),
+    # ---------------- 第三期审核（1.2.5）
+    ("P2 R3 两条资料链接又算菜单", "render.py",
+     '_MENU_MIN_LINKS = 3', '_MENU_MIN_LINKS = 2'),
+    ("P2 R3 链接标题不单独成块", "render.py",
+     'elif _LINKED_HEADING.match(line):', 'elif False and _LINKED_HEADING.match(line):'),
+    ("P2 R3 链接标题吞掉后续数据", "render.py",
+     'if linked and "\\n" not in unit.strip() and', 'if linked and'),
+    ("P3 R3 价格数字当历史年份", "fusion.py",
+     'if not stock_price:\n            return True', 'if True:\n            return True'),
+    ("P3 R3 文本片段不折叠", "fusion.py",
+     'fragment = parts.fragment.split(":~:", 1)[0]', 'fragment = parts.fragment'),
+    ("P3 R3 短密钥按子串替换", "sources.py",
+     'if len(value) >= _MIN_SUBSTRING_SECRET:', 'if True:'),
+    ("P3 R3 纯数值列表继承章节", "render.py",
+     'and _MEASURED_VALUE.search(unit) and not bare_run[i]:', 'and _MEASURED_VALUE.search(unit):'),
+    ("P3 R3 回退重拼单元拆散表格", "render.py",
+     'body = _drop_units(body, [part for part, is_nav in zip(passages, navigation) if is_nav])',
+     'body = "\\n\\n".join(unit for unit, is_nav in zip(units, navigation) if not is_nav)'),
+    ("P2 非法密钥进入传输", "sources.py",
+     'if api_key and any(not 33 <= ord(char) <= 126 for char in api_key):', 'if False:'),
+    ("P2 异常出口取消密钥脱敏", "sources.py",
+     'text = text.replace(value, "[已脱敏的密钥]")', 'text = text'),
+    ("P2 丢弃 SPA 路由", "fusion.py",
+     'urlencode(sorted(kept)), fragment))', 'urlencode(sorted(kept)), ""))'),
+    ("P2 丢弃非默认端口", "fusion.py",
+     'host = f"{host}:{port}"', 'host = host'),
+    ("P2 如何问法误判为背景", "fusion.py",
+     '原理|算法|模型|预测方法', '如何|为什么|原理|算法|模型|预测方法'),
+    ("P2 未来预报日期误判为历史", "fusion.py",
+     'or _query_has_past_date(text)', 'or _CONTENT_DATE.search(text)'),
+    ("P2 空行分隔菜单不再识别", "render.py",
+     'if ((links >= _MENU_MIN_LINKS or (links >= 2 and has_label))', 'if (False'),
+    ("P2 忽略纯文本导航", "render.py",
+     'text = unit.strip().strip(":：>").strip()', 'return False\n    text = unit.strip().strip(":：>").strip()'),
+    ("P2 标题下的数值失去主题", "render.py",
+     'if not navigation[i] and _MEASURED_VALUE.search(unit) and not bare_run[i]:', 'if False:'),
+    ("P2 链接标题不再提供数值上下文", "render.py",
+     'if linked and "\\n" not in unit.strip() and len(re.findall(r"\\[#{1,6}\\s+", unit)) == 1:', 'if False:'),
+    ("P3 普通事件日期覆盖发布日期", "fusion.py",
+     '(not _EVENT_TITLE.search(item.title) and (', '(True and ('),
+    ("P3 豆包跨语言重新选段", "render.py",
+     'preserve_cross_language=bool(body_source)', 'preserve_cross_language=body_source == "parallel"'),
+    ("选段英文恢复子串匹配", "render.py",
+     'return re.compile(_EN_BOUND % re.escape(term))', 'return re.compile(re.escape(term))'),
+    ("Parallel 稀疏命中仍然重选", "render.py",
+     '(preserve_excerpt and len(terms) > 1 and len(matched) < 2)', 'False'),
+    ("Parallel 跨语言仍然重选", "render.py",
+     '(preserve_cross_language and query_cn != body_cn)', 'False'),
+    ("正文代表切换丢失来源", "fusion.py",
+     '"rank_score", "ruyi", "body_source"):', '"rank_score", "ruyi"): '),
+    ("正文选段忽略实际来源", "render.py",
+     'preserve_excerpt=body_source == "parallel"', 'preserve_excerpt=False'),
+    ("词项上限恢复 Unicode 排序", "render.py",
+     'return set(list(terms)[:64])', 'return set(sorted(terms)[:64])'),
+    ("链接菜单重新进入选段", "render.py",
+     'navigation = _navigation_units(units)', 'navigation = [False for unit in units]'),
+    ("弱时效恢复自然年奖励", "fusion.py",
+     'return 0.03 * 2 ** (-max(days, 0) / 30)',
+     'return 0.12 if int(full.group(1)) == today.year else 0.04'),
+    ("时效奖励再次挤压无日期来源", "fusion.py",
+     'score *= 1 + _recency_bonus(_ranking_date(item), strong=strong_fresh)',
+     'score *= 1 + 4 * max(0, _recency_bonus(_ranking_date(item), strong=strong_fresh))'),
+    ("隐式行情查询不缩短缓存", "fusion.py",
+     'return bool(topic and not background)', 'return False'),
+    ("隐式时效误伤历史原理查询", "fusion.py",
+     'return bool(topic and not background)', 'return bool(topic)'),
+    ("排序忽略内容日期", "fusion.py",
+     '_recency_bonus(_ranking_date(item), strong=strong_fresh)',
+     '_recency_bonus(item.publish, strong=strong_fresh)'),
+    ("选段遗漏 q 参数", "gr_search.py",
+     'selection_query=" ".join([query, doubao_query, args.objective or "", *(args.pq or [])])',
+     'selection_query=" ".join([query, args.objective or "", *(args.pq or [])])'),
     ("跨 URL 去重仅比较正文前缀", "fusion.py",
      'return title, body', 'return title, body[:120]'),
     ("跨 URL 等价判断丢弃代码空白和大小写", "fusion.py",
@@ -59,7 +186,7 @@ MUTANTS: tuple[tuple[str, str, str, str], ...] = (
     ("分组表头丢失下层列名", "render.py",
      'context.add(table_start + 2)', 'pass'),
     ("选段忽略数字版本约束", "render.py",
-     r'terms.update(re.findall(r"\d+(?:[.-]\d+)+", query))', 'pass'),
+     r'|\d+(?:[.-]\d+)+|', '|'),
     ("表格跨行字段丢失所属行", "render.py",
      'elif (table_columns and line.count("|") < table_columns',
      'elif (False and table_columns and line.count("|") < table_columns'),
@@ -70,7 +197,8 @@ MUTANTS: tuple[tuple[str, str, str, str], ...] = (
     ("选段带入未闭合相邻代码", "render.py",
      'len(units[j]) <= 450 and complete(j)', 'len(units[j]) <= 450'),
     ("选段忽略查询继续前缀截断", "render.py",
-     'relevant = _relevant_body(body, query, share, indent)', 'relevant = None'),
+     'relevant = _relevant_body(body, query, share, indent, preserve_excerpt=body_source == "parallel",\n'
+     '                                  preserve_cross_language=bool(body_source))', 'relevant = None'),
     # ---------------- 围栏
     ("P1 ruyi 绕过 defang", "render.py",
      'bits.append(f"如意·{field(item.ruyi, label_cap)}")',
@@ -228,15 +356,15 @@ MUTANTS: tuple[tuple[str, str, str, str], ...] = (
     ("P1 出口不做兜底截断", "render.py",
      'if overflow <= 0:\n        return "\\n".join(parts)', 'if True:\n        return "\\n".join(parts)'),
     ("P2 Parallel 告警不传出", "gr_search.py",
-     'for warning in result.warnings:\n            errors.append(f"{result.source} 告警: {warning}")',
+     'for warning in result.warnings:\n            errors.append(sources.redact(f"{result.source} 告警: {warning}", cfg))',
      'pass'),
     ("P2 SourceResult 丢弃告警", "sources.py",
      'request=request_info, warnings=parallel_warnings(body))',
      'request=request_info)'),
     ("P2 time-range 不影响 TTL", "gr_search.py",
-     'strong_fresh = (fusion.is_strong_fresh_query(fresh_probe)\n'
+     'strong_fresh = (fusion.is_strong_fresh_query(fresh_probe, allow_implicit=not bool(args.time_range))\n'
      '                    or fusion.time_range_is_strong_fresh(args.time_range))\n'
-     '    fresh = (args.fresh or strong_fresh or fusion.is_fresh_query(fresh_probe)\n'
+     '    fresh = (args.fresh or strong_fresh or fusion.is_fresh_query(fresh_probe, allow_implicit=not bool(args.time_range))\n'
      '             or fusion.time_range_is_fresh(args.time_range))',
      'strong_fresh = fusion.is_strong_fresh_query(fresh_probe)\n'
      '    fresh = args.fresh or strong_fresh or fusion.is_fresh_query(fresh_probe)'),
@@ -408,6 +536,12 @@ def run_pytest(workdir: Path) -> tuple[int, str]:
 
 
 def main() -> int:
+    # 可选参数按标签子串筛选，例如 `mutants.py R3` 只跑第三期新增的变异体
+    keys = sys.argv[1:]
+    selected = [m for m in MUTANTS if not keys or any(key in m[0] for key in keys)]
+    if not selected:
+        print(f"没有标签匹配 {keys} 的变异体")
+        return 1
     with tempfile.TemporaryDirectory(prefix="gr-search-mutants-") as tmp:
         work = Path(tmp)
         work_skill = work / "skills" / "gr-search"
@@ -427,7 +561,7 @@ def main() -> int:
         print(f"baseline OK  {summary}\n")
 
         escaped: list[str] = []
-        for label, filename, current, broken in MUTANTS:
+        for label, filename, current, broken in selected:
             target = scripts / filename
             original = target.read_text(encoding="utf-8")
             if current not in original:
@@ -453,11 +587,11 @@ def main() -> int:
 
     print()
     if escaped:
-        print(f"{len(escaped)}/{len(MUTANTS)} 个变异体未被捕获：{escaped}")
+        print(f"{len(escaped)}/{len(selected)} 个变异体未被捕获：{escaped}")
         print("原因通常是：用例数据太短、扫描范围太窄、跑错 Python 版本，"
               "或变异体本身改得不彻底。")
         return 1
-    print(f"{len(MUTANTS)}/{len(MUTANTS)} 个变异体全部被捕获")
+    print(f"{len(selected)}/{len(selected)} 个变异体全部被捕获")
     return 0
 
 

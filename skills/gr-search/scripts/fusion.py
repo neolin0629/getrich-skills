@@ -88,14 +88,19 @@ def canonical_url(url: str) -> str:
         return ""
     try:
         parts = urlsplit(url.strip())
+        port = parts.port
     except ValueError:
-        return url.strip().lower()
+        return url.strip()
 
     host = (parts.hostname or "").lower()
     for prefix in _HOST_PREFIXES:
         if host.startswith(prefix) and len(host) > len(prefix) + 3:
             host = host[len(prefix):]
             break
+    if ":" in host:  # IPv6 的括号也是 authority 的一部分。
+        host = f"[{host}]"
+    if port is not None and port != {"http": 80, "https": 443}.get(parts.scheme.lower()):
+        host = f"{host}:{port}"
 
     kept = [
         (k, v)
@@ -112,7 +117,12 @@ def canonical_url(url: str) -> str:
     if len(path) > 1:
         path = path.rstrip("/")
 
-    return urlunsplit(("", host, path, urlencode(sorted(kept)), ""))
+    # 普通章节锚点可折叠，hash/hashbang 路由与状态参数指向独立资源。
+    # 浏览器文本指令只决定高亮位置；不能凭 portal/login 等名字断言路由与首页等价。
+    fragment = parts.fragment.split(":~:", 1)[0]
+    if not (fragment.startswith(("/", "!")) or "=" in fragment):
+        fragment = ""
+    return urlunsplit(("", host, path, urlencode(sorted(kept)), fragment))
 
 
 def _equivalent_key(item: Merged) -> tuple[str, str] | None:
@@ -139,6 +149,7 @@ class Merged:
     also_urls: list[str] = field(default_factory=list)
     ruyi: str | None = None
     score: float = 0.0
+    body_source: str = ""
 
     def absorb(self, doc: Doc) -> None:
         """选择正文更完整的一份作为代表，引用字段随代表一起切换。"""
@@ -146,7 +157,7 @@ class Merged:
         urls = [self.url, *self.also_urls, doc.url]
         if len(doc.body or "") > len(self.body or ""):
             representative = _from_doc(doc)
-            for name in ("url", "title", "body", "site", "publish", "authority", "rank_score", "ruyi"):
+            for name in ("url", "title", "body", "site", "publish", "authority", "rank_score", "ruyi", "body_source"):
                 setattr(self, name, getattr(representative, name))
         self.also_urls = list(dict.fromkeys(u for u in urls if u and u != self.url))
         for image in doc.images:
@@ -174,6 +185,7 @@ def _from_doc(doc: Doc) -> Merged:
         images=list(doc.images),
         sources={doc.source: doc.rank},
         ruyi=doc.extra.get("ruyi"),
+        body_source=doc.source,
     )
 
 
@@ -287,16 +299,74 @@ def time_range_is_strong_fresh(time_range: str | None) -> bool:
     return (time_range or "") in _TIME_RANGE_STRONG or _span_is_day_level(time_range)
 
 
-def is_fresh_query(query: str) -> bool:
+_LIVE_TOPIC_EN = re.compile(_EN_BOUND % "weather|stock price|exchange rate|live score", re.I)
+_BACKGROUND_EN = re.compile(_EN_BOUND % (
+    "history|historical|yesterday|last year|theory|algorithm|model|models|api|dataset|datasets|forecasting|research|paper|papers|documentation|tutorial"), re.I)
+_PRICE_UNIT = re.compile(r"^\s*(?:元|块|美元|港元|点|%|(?:USD|RMB|CNY|HKD|pts)(?![A-Za-z]))", re.I)
+_PRICE_PREFIX = re.compile(
+    r"(?:跌破|突破|站上|收于|报|涨至|跌至|[$¥￥]|(?<![A-Za-z])(?:below|above|under|over|at))\s*$", re.I)
+
+
+def _query_has_past_date(text: str) -> bool:
+    """日期早于今天才是历史语境；没有年份的月日按今年解释。"""
+    import datetime
+
+    today = datetime.date.today()
+    for match in _CONTENT_DATE.finditer(text):
+        year, month, day, compact_month, compact_day = match.groups()
+        try:
+            if datetime.date(int(year), int(month or compact_month), int(day or compact_day)) < today:
+                return True
+        except ValueError:
+            continue
+    for match in re.finditer(r"(?<!\d)(\d{1,2})月(\d{1,2})日", text):
+        # 完整日期已经处理，不能把未来年份的月日改成今年的历史日期。
+        if re.search(r"\d{4}年$", text[:match.start()]):
+            continue
+        try:
+            if datetime.date(today.year, *map(int, match.groups())) < today:
+                return True
+        except ValueError:
+            continue
+    # 裸数字的含义依赖主题，不依赖中文是否插入空格。明确的「年」优先，
+    # 单位或价格动词排除数值；只有股价主题的裸数字默认按价格解释。
+    stock_price = "股价" in text or bool(re.search(_EN_BOUND % "stock price", text, re.I))
+    for match in re.finditer(r"(?<![A-Za-z0-9_])(?:19|20)\d{2}(?![A-Za-z0-9_])", text):
+        if int(match.group()) >= today.year:
+            continue
+        prefix, suffix = text[:match.start()], text[match.end():]
+        if re.match(r"\s*年", suffix):
+            return True
+        if _PRICE_UNIT.match(suffix) or _PRICE_PREFIX.search(prefix):
+            continue
+        if re.search(r"\b(?:in|during|for)\s+(?:the\s+year\s+)?$", prefix, re.I):
+            return True
+        if not stock_price:
+            return True
+    return False
+
+
+def _implicit_fresh_query(text: str) -> bool:
+    """只为行情式查询补隐式日级信号；历史日期、知识和开发问题不触发。"""
+    topic = any(word in text for word in ("天气", "股价", "汇率", "比分")) or _LIVE_TOPIC_EN.search(text)
+    background = (re.search(r"历史|往年|去年|昨天|昨日|原理|算法|模型|预测方法|接口|数据集|气候|研究|论文|文档|教程|是什么", text)
+                  or _query_has_past_date(text)
+                  or _BACKGROUND_EN.search(text))
+    return bool(topic and not background)
+
+
+def is_fresh_query(query: str, *, allow_implicit: bool = True) -> bool:
     """判断 query 是否带时效诉求，决定要不要按时间调权、以及能接受多旧的缓存。"""
     text = query or ""
-    return _cn_fresh_hit(text, _FRESH_WORDS) or bool(_FRESH_WORDS_EN.search(text))
+    return (_cn_fresh_hit(text, _FRESH_WORDS) or bool(_FRESH_WORDS_EN.search(text))
+            or (allow_implicit and _implicit_fresh_query(text)))
 
 
-def is_strong_fresh_query(query: str) -> bool:
+def is_strong_fresh_query(query: str, *, allow_implicit: bool = True) -> bool:
     """日级时效诉求，陈旧内容要被明确压低而不只是不加分。"""
     text = query or ""
-    return _cn_fresh_hit(text, _FRESH_STRONG) or bool(_FRESH_STRONG_EN.search(text))
+    return (_cn_fresh_hit(text, _FRESH_STRONG) or bool(_FRESH_STRONG_EN.search(text))
+            or (allow_implicit and _implicit_fresh_query(text)))
 
 
 def _recency_bonus(publish: str | None, strong: bool = False) -> float:
@@ -325,26 +395,68 @@ def _recency_bonus(publish: str | None, strong: bool = False) -> float:
             return 0.0
         if strong:
             if days <= 2:
-                return 0.20
+                return 0.03
             if days <= 14:
-                return 0.08
+                return 0.01
             if days <= 90:
-                return 0.0
-            if days <= 400:
                 return -0.10
             return -0.20
+        # 30 天半衰期；最多 3%，约等于 k=60 时的两个名次。
+        # 未知日期保持 0，不根据别的页面推测新鲜度；仅有年份也不奖励。
+        return 0.03 * 2 ** (-max(days, 0) / 30)
+    return 0.0
 
-    match = full or re.fullmatch(r"(\d{4})", text)
-    if not match:
-        return 0.0
-    age = today.year - int(match.group(1))
-    if age < 0:
-        return 0.0
-    if age <= 0:
-        return 0.12
-    if age == 1:
-        return 0.04
-    return -0.08 if strong else 0.0
+
+_CONTENT_DATE = re.compile(
+    r"(?<!\d)(\d{4})(?:[-/年](\d{1,2})[-/月](\d{1,2})日?|(\d{2})(\d{2}))(?!\d)")
+_PATH_DATE = re.compile(
+    r"(?:^|/|_)(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)"
+    r"|(?:^|/|_)(\d{4})(\d{2})(\d{2})(?=\.html?(?:$|/)|_)", re.I)
+_EVENT_TITLE = re.compile(r"回顾|复盘|纪念|周年|历史|retrospect|recap|anniversary", re.I)
+
+
+def _ranking_date(item: Merged) -> str | None:
+    """行情快照标题和明确的日期路径可覆盖抓取日期，不改写 publish。
+
+    普通新闻标题中的事件日期不等于发布日期。路径中的裸数字 ID 不当日期；
+    紧凑日期文件名还需在发布时间前五年至后一年内，降低数字编号误识别。
+    """
+    import datetime
+
+    try:
+        path = urlsplit(item.url).path
+    except ValueError:
+        path = ""
+    title = item.title if (not _EVENT_TITLE.search(item.title) and (
+        any(word in item.title for word in ("天气", "股价", "汇率", "比分"))
+        or _LIVE_TOPIC_EN.search(item.title))) else ""
+    reference_year = datetime.date.today().year
+    if item.publish:
+        try:
+            reference_year = datetime.date.fromisoformat(item.publish[:10]).year
+        except ValueError:
+            pass
+    for text, pattern in ((title, _CONTENT_DATE), (path, _PATH_DATE)):
+        dates = set()
+        for match in pattern.finditer(text):
+            if pattern is _CONTENT_DATE:
+                year, month, day, compact_month, compact_day = match.groups()
+                month, day = month or compact_month, day or compact_day
+                compact = False
+            else:
+                year, month, day, compact_year, compact_month, compact_day = match.groups()
+                compact = year is None
+                year, month, day = year or compact_year, month or compact_month, day or compact_day
+            try:
+                value = datetime.date(int(year), int(month), int(day))
+            except ValueError:
+                continue
+            if compact and not reference_year - 5 <= value.year <= reference_year + 1:
+                continue
+            dates.add(value)
+        if len(dates) == 1:
+            return dates.pop().isoformat()
+    return item.publish
 
 
 def rank(merged: list[Merged], cfg: dict, fresh: bool = False, strong_fresh: bool = False) -> list[Merged]:
@@ -362,7 +474,7 @@ def rank(merged: list[Merged], cfg: dict, fresh: bool = False, strong_fresh: boo
             for source, position in item.sources.items()
         )
         if fresh:
-            score *= 1 + _recency_bonus(item.publish, strong=strong_fresh)
+            score *= 1 + _recency_bonus(_ranking_date(item), strong=strong_fresh)
         item.score = score
 
     # 卡片是独立直答类型；普通网页用 RRF，稳定键不依赖源完成顺序。

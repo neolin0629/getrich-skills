@@ -269,7 +269,14 @@ def _doubao_error(body: dict) -> str | None:
     return None
 
 
+def _validate_api_key(api_key: str) -> None:
+    """在 HTTP 或子进程接触密钥前校验，异常中不包含原始值。"""
+    if api_key and any(not 33 <= ord(char) <= 126 for char in api_key):
+        raise ValueError("Invalid API key: expected printable ASCII without whitespace")
+
+
 def _post_json(url: str, payload: dict, api_key: str, timeout: int) -> dict:
+    _validate_api_key(api_key)
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -409,8 +416,10 @@ def doubao_search(cfg: dict, query: str, opts: dict, dry_run: bool = False) -> S
             detail = redact(exc.read().decode("utf-8", "replace"), cfg)[:200]
             error, body = f"HTTP {exc.code} {detail}", None
             break
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-            error, body = f"{type(exc).__name__}: {exc}", None
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+            error, body = redact(f"{type(exc).__name__}: {exc}", cfg), None
+            if isinstance(exc, ValueError) and not isinstance(exc, json.JSONDecodeError):
+                break
             if attempt == 0:
                 time.sleep(0.8)
                 continue
@@ -452,6 +461,7 @@ def parallel_env(cfg: dict) -> dict[str, str]:
     env.pop(cfgmod.PARALLEL_ENV_DEFAULT, None)
     secret, _origin = cfgmod.parallel_key(cfg)
     if secret:
+        _validate_api_key(secret)
         # 判据是"CLI 读的那个变量里是不是这把密钥"，不是"密钥从哪来"。
         # 曾经按 origin != "env" 跳过注入：配了自定义 api_key_env 并 export 之后，
         # origin 是 env、于是不注入，而 CLI 读的仍是 PARALLEL_API_KEY——
@@ -459,6 +469,9 @@ def parallel_env(cfg: dict) -> dict[str, str]:
         # `config show` 显示的却是新的那把，两边对不上还查不出来。
         env[cfgmod.PARALLEL_ENV_DEFAULT] = secret
     return env
+
+
+_MIN_SUBSTRING_SECRET = 8
 
 
 def redact(text: str, cfg: dict) -> str:
@@ -470,9 +483,21 @@ def redact(text: str, cfg: dict) -> str:
     """
     if not text:
         return text
+    variants: set[str] = set()
     for secret, _ in (cfgmod.parallel_key(cfg), cfgmod.doubao_key(cfg)):
-        if secret and len(secret) >= 8:
-            text = text.replace(secret, "[已脱敏的密钥]")
+        if secret:
+            # header 校验可能输出 bytes 的 repr，其他客户端可能输出 JSON 转义。
+            variants.update((secret, repr(secret)[1:-1],
+                             repr(secret.encode("utf-8", "backslashreplace"))[2:-1], json.dumps(secret)[1:-1]))
+            variants.update(part for part in secret.splitlines() if len(part) >= 8)
+    for value in sorted(variants, key=len, reverse=True):
+        if len(value) >= _MIN_SUBSTRING_SECRET:
+            text = text.replace(value, "[已脱敏的密钥]")
+        else:
+            # 过短的值（多半是 test 这类占位符）按子串替换会把 latest、contest
+            # 一起搅乱，排查时反而读不懂错误。只替换独立出现的整词。
+            text = re.sub(rf"(?<![A-Za-z0-9_\-]){re.escape(value)}(?![A-Za-z0-9_\-])",
+                          "[已脱敏的密钥]", text)
     return text
 
 
@@ -600,6 +625,7 @@ def _parallel_cache_fingerprint(objective: str, queries: list[str], opts: dict, 
 
 
 def _post_parallel(path: str, payload: dict, api_key: str, timeout: int) -> dict:
+    _validate_api_key(api_key)
     request = urllib.request.Request(
         f"https://api.parallel.ai{path}",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -683,8 +709,8 @@ def _parallel_search_http(cfg: dict, objective: str, queries: list[str], opts: d
         hint = "（402/403 通常是余额不足，可运行 parallel-cli balance get）" if exc.code in (402, 403) else ""
         return SourceResult("parallel", error=f"HTTP {exc.code} {detail}{hint}",
                             elapsed=time.monotonic() - started, request=request_info)
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-        return SourceResult("parallel", error=f"{type(exc).__name__}: {exc}",
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+        return SourceResult("parallel", error=redact(f"{type(exc).__name__}: {exc}", cfg),
                             elapsed=time.monotonic() - started, request=request_info)
 
     if not opts.get("no_cache"):
@@ -755,9 +781,9 @@ def parallel_search(cfg: dict, objective: str, queries: list[str], opts: dict, d
             "parallel", error=f"超时（{PARALLEL_TIMEOUT}s）",
             elapsed=time.monotonic() - started, request={"cmd": cmd},
         )
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         return SourceResult(
-            "parallel", error=f"{type(exc).__name__}: {exc}",
+            "parallel", error=redact(f"{type(exc).__name__}: {exc}", cfg),
             elapsed=time.monotonic() - started, request={"cmd": cmd},
         )
     finally:
@@ -819,8 +845,8 @@ def _parallel_extract_http(
     except urllib.error.HTTPError as exc:
         detail = redact(exc.read().decode("utf-8", "replace"), cfg)[:300]
         return [], f"HTTP {exc.code} {detail}", warnings
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-        return [], f"{type(exc).__name__}: {exc}", warnings
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+        return [], redact(f"{type(exc).__name__}: {exc}", cfg), warnings
 
     pages = _extract_pages(body)
     # Search 那边补了顶层 warnings，Extract 这边一度还漏着：字段降级、
@@ -891,8 +917,8 @@ def parallel_extract(
             body = json.load(fh)
     except subprocess.TimeoutExpired:
         return [], f"抓取超时（{EXTRACT_TIMEOUT}s）", warnings
-    except (OSError, json.JSONDecodeError) as exc:
-        return [], f"{type(exc).__name__}: {exc}", warnings
+    except (OSError, ValueError) as exc:
+        return [], redact(f"{type(exc).__name__}: {exc}", cfg), warnings
     finally:
         try:
             os.unlink(out_path)

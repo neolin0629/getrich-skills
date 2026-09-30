@@ -78,7 +78,7 @@ def test_invalid_or_future_publish_not_rewarded(value, strong):
 def test_freshness_is_relative_to_rank():
     doc = fusion._from_doc(document('parallel', 1, publish=datetime.date.today().isoformat()))
     fusion.rank([doc], config.DEFAULTS, fresh=True, strong_fresh=True)
-    assert doc.score == pytest.approx(1.2 / 61)
+    assert doc.score == pytest.approx(1.03 / 61)
 
 
 @pytest.mark.parametrize('value', ['unknown', float('nan'), float('inf'), -1, 2, True, {}])

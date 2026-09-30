@@ -103,7 +103,8 @@
 
 ## 卡片短路
 
-`gr_search.py` 默认开启 `card_shortcircuit`：走 Custom 版时先调豆包，
-若返回了 `CardResults` 就跳过 Parallel —— 卡片本身就是权威直答，再花钱搜网页没有增量。
+`gr_search.py` 默认双源并行，`card_shortcircuit` 为 `false`。
+显式传入 `--card-shortcircuit` 或将配置设为 `true` 时，先调豆包；
+若返回了卡片结果就跳过 Parallel，否则继续调用 Parallel。
 
-`--force-all` 关掉这个行为；`config.json` 里 `card_shortcircuit: false` 永久关掉。
+`--force-all` 可覆盖已开启的短路策略，双源查询仍调用两路；单源及图片查询保留原有来源选择。

@@ -672,9 +672,9 @@ def test_upstream_warnings_reach_json(monkeypatch, capsys, tmp_path):
     pytest.param(None, None, id="未指定"),
 ])
 def test_time_range_drives_cache_ttl(monkeypatch, time_range, expect):
-    """回归：`天气 --time-range OneDay` 仍可命中 30 分钟前的缓存。
+    """回归：`资料 --time-range OneDay` 仍可命中 30 分钟前的缓存。
     显式的相对时间范围是比任何关键词都明确的时效诉求。"""
-    assert _cache_ttl(monkeypatch, query="天气", source="doubao",
+    assert _cache_ttl(monkeypatch, query="资料", source="doubao",
                       time_range=time_range) == expect
 
 

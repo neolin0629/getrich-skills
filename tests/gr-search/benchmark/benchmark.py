@@ -188,10 +188,17 @@ def _replay(payload):
     if body.get('parallel') is not None:
         docs += sources._map_parallel(body['parallel'])
     cfg = copy.deepcopy(config.DEFAULTS)
-    flags = raw.get('diagnostics', {})
+    flags = raw.get('diagnostics', {}).get('freshness_request', {})
     probe = ' '.join([question['q'][:100], question['objective'], *question['pq'][:5]])
-    strong = bool(flags.get('strong_fresh', fusion.is_strong_fresh_query(probe)))
-    fresh = bool(flags.get('fresh', strong or fusion.is_fresh_query(probe)))
+    # 派生的旧判定不可复用。老文件未记录显式参数时按未指定处理，不猜原因。
+    time_range = flags.get('time_range')
+    def query_flag(function):
+        kwargs = {'allow_implicit': not bool(time_range)} if 'allow_implicit' in inspect.signature(function).parameters else {}
+        return function(probe, **kwargs)
+    strong = bool(query_flag(fusion.is_strong_fresh_query)
+                  or (time_range and fusion.time_range_is_strong_fresh(time_range)))
+    fresh = bool(flags.get('fresh', False) or strong or query_flag(fusion.is_fresh_query)
+                 or (time_range and fusion.time_range_is_fresh(time_range)))
     ranked = fusion.rank(fusion.merge(docs, threshold=cfg['fusion']['dedup_jaccard']),
                          cfg, fresh=fresh, strong_fresh=strong)
     output = {}
@@ -203,7 +210,7 @@ def _replay(payload):
         # full question via their established query argument, never a short q.
         assemble = getattr(render, '_assemble', render.render)
         if 'selection_query' in inspect.signature(assemble).parameters:
-            kwargs['selection_query'] = ' '.join([question['question'], question['objective'], *question['pq']])
+            kwargs['selection_query'] = ' '.join([question['question'], question['q'][:100], question['objective'], *question['pq']])
         signature = inspect.signature(render.render)
         if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()):
             kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}

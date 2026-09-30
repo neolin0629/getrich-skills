@@ -15,9 +15,62 @@ SPEC.loader.exec_module(benchmark)
 READER_SPEC = importlib.util.spec_from_file_location('gr_packet_reader', Path(__file__).with_name('read_question.py'))
 reader = importlib.util.module_from_spec(READER_SPEC)
 READER_SPEC.loader.exec_module(reader)
+NOISE_SPEC = importlib.util.spec_from_file_location('gr_noise', Path(__file__).with_name('score_noise.py'))
+noise = importlib.util.module_from_spec(NOISE_SPEC)
+NOISE_SPEC.loader.exec_module(noise)
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_replay_recomputes_derived_flags_but_preserves_explicit_requests(self):
+        """采集时的 True/False 均不能锁住新版查询判断；显式参数仍生效。"""
+        cases = [
+            (True, False, {}, False, False),
+            (False, True, {}, True, True),
+            (False, False, {'fresh': True}, True, False),
+            (False, False, {'time_range': 'OneDay'}, True, True),
+            (True, True, {'time_range': 'OneYear'}, False, False),
+        ]
+        for old, implicit, request, fresh, strong in cases:
+            with self.subTest(request=request, old=old), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'config.py').write_text("DEFAULTS={'fusion': {'dedup_jaccard': 1.0}}\n")
+                (root / 'sources.py').write_text('def _map_custom(body): return [], []\ndef _map_parallel(body): return []\n')
+                (root / 'fusion.py').write_text(f'''def is_strong_fresh_query(q, allow_implicit=True): return {implicit} and allow_implicit
+def is_fresh_query(q, allow_implicit=True): return {implicit} and allow_implicit
+def time_range_is_strong_fresh(value): return value == 'OneDay'
+def time_range_is_fresh(value): return value == 'OneDay'
+def merge(docs, threshold): return docs
+def rank(docs, cfg, **kw):
+    assert kw['fresh'] is {fresh} and kw['strong_fresh'] is {strong}, kw
+    return docs
+''')
+                (root / 'render.py').write_text("def render(**kw): return 'evidence'\n")
+                benchmark.worker(root, 'replay', {
+                    'raw': {'timestamp': '2026-09-30T00:00:00', 'raw': {},
+                            'diagnostics': {'fresh': old, 'strong_fresh': old, 'freshness_request': request}},
+                    'question': {'id': 'X1', 'question': 'weather', 'q': 'weather', 'objective': 'weather', 'pq': []},
+                    'budgets': [8000]})
+
+    def test_noise_metrics_include_overlaps_once_and_weight_visible_budget(self):
+        rows = [dict(id='T1-1', visible_chars=100, relevant=True, stale=False, navigation=False),
+                dict(id='T1-2', visible_chars=300, relevant=False, stale=True, navigation=True),
+                dict(id='T1-3', visible_chars=100, relevant=True, stale=True, navigation=False)]
+        result = noise.score(rows)
+        self.assertAlmostEqual(result['relevance_precision'], 2 / 3)
+        self.assertAlmostEqual(result['noise_rate'], 2 / 3)
+        self.assertAlmostEqual(result['noisy_result_char_share'], .8)
+        self.assertEqual(result['stale_results'], 2)
+        self.assertIsNone(noise.score([])['noise_rate'])
+
+    def test_noise_metrics_reject_unknown_labels_and_duplicate_results(self):
+        row = dict(id='T1-1', visible_chars=100, relevant=True, stale=False, navigation=False)
+        for key, value in [('relevant', None), ('stale', 0), ('navigation', 'false'),
+                           ('visible_chars', -1), ('id', '')]:
+            with self.assertRaises(ValueError):
+                noise.score([dict(row, **{key: value})])
+        with self.assertRaises(ValueError):
+            noise.score([row, row])
+
     def test_reader_emits_entire_evidence_and_no_other_question(self):
         evidence = 'prefix\n' * 2000 + 'TAIL: exception is still present.'
         with tempfile.TemporaryDirectory() as directory:
@@ -126,7 +179,13 @@ class BenchmarkTests(unittest.TestCase):
             root = Path(directory)
             (root / 'config.py').write_text("DEFAULTS={'fusion': {'dedup_jaccard': .9}}\n")
             (root / 'sources.py').write_text('def _map_custom(body): return [], []\ndef _map_parallel(body): return []\n')
-            (root / 'fusion.py').write_text('def is_strong_fresh_query(q): return False\ndef is_fresh_query(q): return False\ndef merge(docs, threshold): return docs\ndef rank(docs, cfg, **kw): return docs\n')
+            (root / 'fusion.py').write_text('''def is_strong_fresh_query(q): return True
+def is_fresh_query(q): return True
+def merge(docs, threshold): return docs
+def rank(docs, cfg, **kw):
+    assert kw['strong_fresh'] and kw['fresh']
+    return docs
+''')
             (root / 'render.py').write_text('''import socket, subprocess, datetime
 
 def _assemble(selection_query=None): pass
@@ -137,11 +196,12 @@ def render(**kwargs):
         except RuntimeError: pass
         else: raise AssertionError('offline transport allowed')
     assert kwargs['query'] == 'full question'
-    assert kwargs['selection_query'] == 'full question objective keyword'
+    assert kwargs['selection_query'] == 'full question short objective keyword'
     assert str(datetime.date.today()) == '2020-01-02'
     return 'safe evidence'
 ''')
-            data = benchmark.worker(root, 'replay', {'raw': {'timestamp': '2020-01-02T00:00:00', 'raw': {}},
+            data = benchmark.worker(root, 'replay', {'raw': {'timestamp': '2020-01-02T00:00:00', 'raw': {},
+                'diagnostics': {'fresh': False, 'strong_fresh': False}},
                 'question': {'id': 'X1', 'question': 'full question', 'q': 'short', 'objective': 'objective', 'pq': ['keyword']},
                 'budgets': [8000]})
         self.assertEqual(data['source_call_count'], 0)

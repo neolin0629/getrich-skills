@@ -136,9 +136,10 @@ def run_search(args: argparse.Namespace, cfg: dict) -> int:
     # --time-range 是比任何关键词都明确的时效诉求，却一度完全不参与判定：
     # `天气 --time-range OneDay` 仍然可以命中 30 分钟前的缓存。
     fresh_probe = " ".join(t for t in probe_parts if t)
-    strong_fresh = (fusion.is_strong_fresh_query(fresh_probe)
+    # 显式时间范围覆盖隐式主题推断，避免历史天气被当成今日实况。
+    strong_fresh = (fusion.is_strong_fresh_query(fresh_probe, allow_implicit=not bool(args.time_range))
                     or fusion.time_range_is_strong_fresh(args.time_range))
-    fresh = (args.fresh or strong_fresh or fusion.is_fresh_query(fresh_probe)
+    fresh = (args.fresh or strong_fresh or fusion.is_fresh_query(fresh_probe, allow_implicit=not bool(args.time_range))
              or fusion.time_range_is_fresh(args.time_range))
     cache_ttl = int(cfg["cache"].get("fresh_ttl_seconds", 120)) if fresh else None
 
@@ -190,13 +191,13 @@ def run_search(args: argparse.Namespace, cfg: dict) -> int:
         try:
             return sources.doubao_search(cfg, doubao_query, opts)
         except Exception as exc:
-            return sources.SourceResult("doubao", error=f"{type(exc).__name__}: {exc}")
+            return sources.SourceResult("doubao", error=sources.redact(f"{type(exc).__name__}: {exc}", cfg))
 
     def call_parallel() -> sources.SourceResult:
         try:
             return sources.parallel_search(cfg, objective, keywords, opts)
         except Exception as exc:
-            return sources.SourceResult("parallel", error=f"{type(exc).__name__}: {exc}")
+            return sources.SourceResult("parallel", error=sources.redact(f"{type(exc).__name__}: {exc}", cfg))
 
     # 显式省调用模式才先查豆包；默认并行，避免未命中卡片时累加两路延迟。
     shortcircuit = (
@@ -228,9 +229,9 @@ def run_search(args: argparse.Namespace, cfg: dict) -> int:
         # （spec/input 校验告警、检索降级），只留在 raw 里等于让用户永远看不到，
         # --no-dump 时更是连翻都没处翻。
         for warning in result.warnings:
-            errors.append(f"{result.source} 告警: {warning}")
+            errors.append(sources.redact(f"{result.source} 告警: {warning}", cfg))
         if result.error:
-            errors.append(f"{result.source} 失败: {result.error}")
+            errors.append(sources.redact(f"{result.source} 失败: {result.error}", cfg))
             continue
         docs.extend(result.docs)
         cards.extend(result.cards)
@@ -242,7 +243,8 @@ def run_search(args: argparse.Namespace, cfg: dict) -> int:
 
     budget, profile = cfgmod.resolve_budget(cfg, args.profile, args.budget)
     diagnostics = {
-        "ranking": "rrf-v2", "fresh": bool(fresh), "strong_fresh": bool(strong_fresh),
+        "ranking": "rrf-v4", "fresh": bool(fresh), "strong_fresh": bool(strong_fresh),
+        "freshness_request": {"fresh": bool(args.fresh), "time_range": args.time_range},
         "effective_dedup_threshold": 1.0, "dedup_mode": "exact_body",
         "fusion": {key: cfg["fusion"][key] for key in
                    ("weight_doubao", "weight_parallel", "rrf_k", "dedup_jaccard")},
@@ -306,7 +308,7 @@ def run_search(args: argparse.Namespace, cfg: dict) -> int:
         query=query, items=ranked, cards=cards, budget=budget, profile=profile,
         stats=stats, errors=errors, elapsed=elapsed, dump_path=dump_path,
         image_mode=image_mode,
-        selection_query=" ".join([query, args.objective or "", *(args.pq or [])]),
+        selection_query=" ".join([query, doubao_query, args.objective or "", *(args.pq or [])]),
     ))
     return 0 if (ranked or cards) else 1
 
@@ -342,9 +344,14 @@ def run_fetch(args: argparse.Namespace, cfg: dict) -> int:
         print("URL 列表不能为空", file=sys.stderr)
         return 2
 
-    pages, error, warnings = sources.parallel_extract(
-        cfg, urls, args.objective, args.max_chars, session_id=args.session_id
-    )
+    try:
+        pages, error, warnings = sources.parallel_extract(
+            cfg, urls, args.objective, args.max_chars, session_id=args.session_id
+        )
+    except Exception as exc:
+        pages, error, warnings = [], f"{type(exc).__name__}: {exc}", []
+    error = sources.redact(error, cfg) if error else None
+    warnings = [sources.redact(warning, cfg) for warning in warnings]
     # 部分失败的 warning 里拼着上游返回的 URL 和 error_type，是不可信内容，
     # 和正文一样要中和边界标记、一样要进围栏——它只是"较短的上游文本"，不是元信息。
     #
@@ -504,8 +511,8 @@ def run_config(args: argparse.Namespace, cfg: dict) -> int:
             print("    请查 parallel-cli 文档确定真名，改配置项 parallel.api_key_env，不要猜。")
         if not auth.get("authenticated"):
             print("  未鉴权：运行 /parallel-cli-setup 走 OAuth，或用 config set-key parallel 配密钥")
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as exc:
-        print(f"  ⚠ 无法读取鉴权状态: {exc}")
+    except (subprocess.TimeoutExpired, ValueError, OSError) as exc:
+        print(sources.redact(f"  ⚠ 无法读取鉴权状态: {exc}", cfg))
     return 0
 
 
