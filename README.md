@@ -1,23 +1,31 @@
 # getrich-skills
 
-一套面向联网搜索、内容创作和 Obsidian 文档处理的 AI Skill 集合，目前包含 5 个 Skill。
+一套面向联网搜索、中文内容创作和 Obsidian 文档处理的 AI Skill 集合，适用于 Claude Code、Codex 等支持 Skill 的 Agent。
 
 ## 安装
 
-使用以下命令，将全部 Skill 全局安装到 Claude Code 和 Codex：
+将全部 Skill 全局安装到 Claude Code 和 Codex：
 
 ```bash
 npx skills add neolin0629/getrich-skills -a claude-code -a codex -g -y
 ```
 
-也可以通过 `@` 或 `--skill` 只安装一个 Skill：
+只安装其中一个 Skill，用 `--skill` 指定名称：
 
 ```bash
-npx skills use neolin0629/getrich-skills@gr-search | claude
-npx skills use neolin0629/getrich-skills --skill gr-search --agent claude-code
+npx skills add neolin0629/getrich-skills --skill gr-search -a claude-code -g -y
 ```
 
-安装完成后，重启对应的 AI 客户端。
+全局安装的文件位于 `~/.agents/skills/<skill-name>/`，再链接到各 Agent 的 Skill 目录。用 `npx skills list -g` 可以查看实际路径。安装完成后，重启对应的 AI 客户端。
+
+后续更新或卸载：
+
+```bash
+npx skills update -g
+npx skills remove -g --skill gr-search
+```
+
+如果只想试用、不安装，可以用 `npx skills use neolin0629/getrich-skills@gr-search` 生成一段使用该 Skill 的提示词。
 
 ## Skill 一览
 
@@ -26,8 +34,8 @@ npx skills use neolin0629/getrich-skills --skill gr-search --agent claude-code
 | `gr-search` | 同时调用豆包搜索和 Parallel，去重融合后按字符预算选取相关段落，支持图片搜索与正文抓取 |
 | `gr-chinese-typography-rules` | 检查或统一中文排版，覆盖中英文空格、标点、引号、数字、日期和金融表达，附机械自检脚本 |
 | `gr-content-ai-avoid` | 保留事实与作者风格，按 6 层、39 条规则减少套话，提供脚本候选与人工复核 |
-| `gr-ob-fix-color-tags` | 用全角括号包裹 Obsidian `prompts/` 目录中的十六进制颜色代码，避免被识别为标签 |
-| `gr-ob-rm-prompts-formatter` | 批量删除 Obsidian `prompts/` 目录中 Markdown 文件开头的 YAML frontmatter |
+| `gr-ob-fix-color-tags` | 用全角括号包裹 Obsidian 笔记中的十六进制颜色代码（`#FFFFFF` → `（#FFFFFF）`），避免被识别为标签；处理前会询问目标目录 |
+| `gr-ob-rm-prompts-formatter` | 批量删除 Obsidian 笔记开头的 YAML frontmatter，默认处理 `prompts/` 目录，可指定其他目录 |
 
 安装后，可以直接描述任务，也可以显式指定 Skill 名称。例如：
 
@@ -38,38 +46,55 @@ npx skills use neolin0629/getrich-skills --skill gr-search --agent claude-code
 
 `gr-chinese-typography-rules` 负责排版，`gr-content-ai-avoid` 负责表达；创作中文内容时可配合使用。
 
-## 各 Skill 的优势
+两个 `gr-ob-*` Skill 依赖 shell 命令批量改写文件，仅支持 macOS / Linux。`gr-ob-rm-prompts-formatter` 是破坏性操作，执行前请确认目标目录已纳入 Git 且工作区干净，或已提前备份。
+
+## 各 Skill 的特点
 
 ### gr-search：兼顾信源覆盖和上下文预算
 
-一次调用即可并行检索豆包和 Parallel，让中文站点、结构化直答与英文、长尾信源相互补充，省去 Agent 分别调用后再整理的步骤。两路结果默认等权融合，按问题选取相关正文段落，适合需要交叉查证、又不想让大段搜索结果占满上下文的任务。尤其方便的是，全量返回结果会保存在本地 JSON 中：追问时可以继续查看未展开的内容；跨 URL 仅合并标题与正文完全一致的结果，保留相似页面中的版本、条件和措辞差异，便于核对。
+一次调用并行检索豆包和 Parallel：豆包补中文站点、结构化直答和行业过滤，Parallel 补英文与长尾信源。两路结果等权融合，按问题选取相关正文段落，避免大段搜索结果占满上下文。全量结果保存在本地 JSON 中，追问时可直接读取未展开的内容。跨 URL 只合并标题与正文完全一致的结果，相似页面之间的版本、条件和措辞差异都会保留，便于核对。
 
 ### gr-chinese-typography-rules：统一格式时保留原意和技术内容
 
-把中英文空格、标点、数字、日期等常见排版问题放进同一套检查流程，适合中英文混排的文章、技术文档和数据报告。它明确区分格式错误、风格建议与语义疑点，并优先保留原文已有的合法风格，减少不必要的改动。代码、链接、公式和原文引用都有保护规则；附带的脚本负责定位机械问题，再结合语境复核，方便批量检查，也便于逐项确认修改依据。
+把中英文空格、标点、数字、日期等常见问题放进同一套检查流程，适合中英文混排的文章、技术文档和数据报告。检查结果区分格式错误、风格建议与语义疑点，原文已有的合法风格优先保留。代码、链接、公式和原文引用受保护；附带脚本定位机械问题，再结合语境复核，每处修改都有依据。
 
 ### gr-content-ai-avoid：让表达更具体，同时守住事实和作者风格
 
-从词汇、句法、结构、内容、真实感和格式六个层次检查空泛套话与机械重复，适合文章、社交平台笔记和口播稿的创作与润色。它将事实、原意和用户风格放在首位，明确要求保留观点力度、限定条件与必要术语，不为增加「真实感」编造经历。39 条规则配合体裁设置、脚本候选定位和人工复核，帮助找到值得修改的具体段落；合理表达可以保留，不必为了消除命中而反复改稿。
+从词汇、句法、结构、内容、真实感和格式六个层次检查空泛套话与机械重复，适合文章、社交平台笔记和口播稿。事实、原意和作者风格优先：保留观点力度、限定条件与必要术语，不为增加「真实感」编造经历。39 条规则配合体裁设置、脚本候选和人工复核，只改值得改的段落，合理表达不必为了消除命中而改写。
 
-## 可选依赖
+## gr-search 配置
 
-`gr-search` 不需要 pip 依赖（纯标准库），但需要：
+`gr-search` 只用 Python 标准库，无需 pip 依赖。使用前需要配置两个搜索源的凭据，只配置其中一个时可以用 `--source doubao` 或 `--source parallel` 单源运行。
 
-```bash
-# Parallel CLI（用于补充信源和抓取网页正文）
-uv tool install "parallel-web-tools[cli]"
-```
-
-以及一个[豆包搜索](https://console.volcengine.com/search-infinity/web-search) API Key。首次使用时**由你本人在终端**执行下面的命令写入（不回显、不进命令行历史）：
+下面的命令假设 Skill 已全局安装；如果直接在克隆的仓库里运行，把 `GR` 改成 `skills/gr-search`。
 
 ```bash
-python3 skills/gr-search/scripts/gr_search.py config set-key doubao
+GR=~/.agents/skills/gr-search
 ```
 
-[Parallel](https://platform.parallel.ai/home) 侧可以跑 `/parallel-cli-setup` 走 OAuth 登录；换机器时也可以用
-`config set-key parallel` 配置 API Key，避免每台机器重新登录。
-配置完成后用 `config doctor` 检查两个源是否都可用。
+**豆包**：在[联网搜索控制台](https://console.volcengine.com/search-infinity/api-key)创建 API Key，然后**由你本人在终端**执行下面的命令写入。密钥不会回显，也不会进入命令行历史。不要把密钥发到对话里让 Agent 代填。
+
+```bash
+python3 "$GR/scripts/gr_search.py" config set-key doubao
+```
+
+**Parallel**（可选，用于补充信源和抓取网页正文）：
+
+- 安装 CLI：`uv tool install "parallel-web-tools[cli]"`。未安装时会自动改用 HTTP 直连。
+- 登录：已安装 Parallel 插件的 Claude Code 可以运行 `/parallel-cli-setup` 走 OAuth 登录；也可以在 [Parallel 控制台](https://platform.parallel.ai/home)获取 API Key，再执行 `python3 "$GR/scripts/gr_search.py" config set-key parallel`。换机器时推荐后者，免去每台机器重新登录。
+
+配置完成后检查两个源是否可用：
+
+```bash
+python3 "$GR/scripts/gr_search.py" config doctor
+```
+
+配置文件位于 `~/.config/gr-search/config.json`。从旧版本升级时，已保存的旧配置会覆盖新版默认值，可以先预览再应用迁移：
+
+```bash
+python3 "$GR/scripts/gr_search.py" config migrate-defaults
+python3 "$GR/scripts/gr_search.py" config migrate-defaults --apply
+```
 
 各 Skill 的具体用法和限制以对应目录内的 `SKILL.md` 为准。
 
@@ -77,28 +102,34 @@ python3 skills/gr-search/scripts/gr_search.py config set-key doubao
 
 ```text
 .
-├── skills/
+├── .claude-plugin/
+│   └── marketplace.json      # Skill 清单
+├── skills/                   # 分发给 Agent 的 Skill
 │   ├── gr-chinese-typography-rules/
 │   ├── gr-content-ai-avoid/
 │   ├── gr-ob-fix-color-tags/
 │   ├── gr-ob-rm-prompts-formatter/
 │   └── gr-search/
-└── tests/
-    ├── gr-content-ai-avoid/
-    └── gr-search/
+├── tests/                    # 测试，不随 Skill 分发
+│   ├── gr-chinese-typography-rules/
+│   ├── gr-content-ai-avoid/
+│   └── gr-search/
+└── prompts/                  # 个人提示词库，与 Skill 无关
 ```
 
 ## 开发与测试
 
-测试套件统一维护在根目录 `tests/` 下，与分发给 Agent 的 `skills/` 解耦。使用 `npx skills add` 安装 Skill 时，只会打包对应 `skills/<skill-name>` 目录，不会将测试代码分发至用户的 Agent 目录中。
+测试统一维护在根目录 `tests/` 下，与分发给 Agent 的 `skills/` 解耦。使用 `npx skills add` 安装时只会打包对应的 `skills/<skill-name>` 目录，测试代码不会进入用户的 Agent 目录。
 
-在仓库根目录下运行测试（无需安装项目依赖，由 `uv` 临时拉取 pytest）：
+在仓库根目录运行测试（无需安装项目依赖，由 `uv` 临时拉取 pytest）：
 
 ```bash
 uv run --python "$(which python3)" --with pytest --with click pytest tests/ -q
 ```
 
-运行变异自检（验证测试用例的有效性与缺陷捕获能力）：
+带 `perf` 标记的用例断言墙钟耗时，机器负载高时可能偶发失败；可以用 `-m 'not perf'` 排除。
+
+运行变异自检，验证测试用例能否捕获注入的缺陷（会自动排除 `perf` 用例）：
 
 ```bash
 uv run --python "$(which python3)" --with pytest --with click python tests/gr-search/mutants.py

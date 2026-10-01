@@ -5,13 +5,13 @@
     "email": "storychat@gmail.com"
   },
   "metadata": {
-    "description": "GetRich skills for daily routines, and content creation workflows.",
+    "description": "GetRich skills for web search, Chinese content creation, and Obsidian note processing.",
     "version": "0.1.0"
   },
   "plugins": [
     {
       "name": "getrich-skills",
-      "description": "All GetRich skills for daily routines and content creation workflows.",
+      "description": "All GetRich skills: dual-source web search, Chinese typography and writing review, and Obsidian note cleanup.",
       "source": "./",
       "strict": false,
       "skills": [
