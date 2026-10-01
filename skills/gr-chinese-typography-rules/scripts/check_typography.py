@@ -16,6 +16,7 @@ gr-chinese-typography-rules 机械自检脚本。
     python3 check_typography.py 稿子.md
     python3 check_typography.py 稿子.md --level error   # 只看默认规则问题
     python3 check_typography.py 稿子.md --json
+    python3 check_typography.py 稿子.md --profile finance # 启用金融正文规则
     python3 check_typography.py 稿子.md --fail-on error # 有 error 时退出码 1
     echo "文本" | python3 check_typography.py -
 """
@@ -28,8 +29,11 @@ import re
 import sys
 from pathlib import Path
 
-CJK = r"一-鿿㐀-䶿"
-CJK_PUNCT = r"，。；：！？、（）【】《》「」『』——…"
+CJK = (
+    "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+    "\U00020000-\U0002a6df\U0002a700-\U0002ee5f"
+    "\U0002f800-\U0002fa1f\U00030000-\U0003347f"
+)
 
 LEVEL_ICON = {"error": "🔴", "warn": "⚠️"}
 
@@ -51,11 +55,18 @@ MASK_PATTERNS = [
     re.compile(r"\\\(.*?\\\)|\\\[.*?\\\]", re.S),
     re.compile(rf"https?://[{URL_CHARS}]+"),           # 裸 URL（不吞后面的中文正文）
     re.compile(r"</?[A-Za-z][^>\n]*>|<![A-Z][^>\n]*>"),
-    re.compile(r"^(?:[ ]{4,}|[ ]{0,3}\t)[^\n]*$", re.M),
     re.compile(r"^[ ]{0,3}\[[^]\n]+\]:[^\n]*(?:\n[ \t]+[\"'(][^\n]*)?", re.M),
 ]
 
-ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+ISO_DATE = re.compile(r"(?<![0-9-])\d{4}-(?:0[1-9]|1[0-2])(?:-\d{2})?(?![0-9-])")
+FINANCE_RULES = {"thousands", "math-space"}
+# 有明确标签或结构的编号；只屏蔽数值，附近正文仍须检查。
+IDENTIFIERS = [
+    re.compile(r"(?<![A-Za-z0-9])ISBN(?:-1[03])?[ \t]*[:：]?[ \t]*(?P<value>\d[\d-]*[\dXx])\b", re.I),
+    re.compile(r"(?:电话|手机|联系|Tel\.?)[ \t]*[:：]?[ \t]*(?P<value>(?:\+86[- ]?)?(?:1[3-9]\d{9}|0\d{2,3}-\d{7,8}))(?!\d)", re.I),
+    re.compile(r"(?:股票代码|证券代码|代码)[ \t]*[:：]?[ \t]*(?P<value>\d{6})(?!\d)"),
+    re.compile(r"[（(](?P<value>\d{6})[）)]"),
+]
 
 
 def blank_span(out: list[str], start: int, end: int) -> None:
@@ -75,11 +86,17 @@ def blank_out(text: str, pattern: re.Pattern) -> str:
 def mask_blocks(text: str) -> str:
     """保守屏蔽块结构；未闭合围栏延伸到文件末尾。"""
     out = list(text)
+    lines = text.splitlines(keepends=True)
     fence = None
     frontmatter = False
     quote = False
+    list_indents: list[int] = []
+    callout_end = 0
     offset = 0
-    for index, line in enumerate(text.splitlines(keepends=True)):
+    for index, line in enumerate(lines):
+        if index < callout_end:
+            offset += len(line)
+            continue
         body = line.rstrip("\r\n")
         if index == 0 and body.lstrip("\ufeff") == "---":
             frontmatter = True
@@ -89,22 +106,68 @@ def mask_blocks(text: str) -> str:
                 frontmatter = False
         elif fence:
             blank_span(out, offset, offset + len(line))
-            if re.fullmatch(r"[ ]{0,3}" + re.escape(fence[0]) + "{" + str(fence[1]) + r",}[ \t]*", body):
+            expanded = body.expandtabs(4)
+            closer = r"[ ]{0,3}" + re.escape(fence[0]) + "{" + str(fence[1]) + r",}[ \t]*"
+            # 收尾行可以退回顶层；按列表内容列匹配时只能去掉缩进，不能切掉围栏字符。
+            if re.fullmatch(closer, expanded) or (
+                not expanded[:fence[2]].strip()
+                and re.fullmatch(closer, expanded[fence[2]:])
+            ):
                 fence = None
         else:
-            opener = re.match(r"[ ]{0,3}(`{3,}|~{3,})(.*)$", body)
-            if opener and not (opener[1][0] == "`" and "`" in opener[2]):
-                fence = (opener[1][0], len(opener[1]))
+            expanded = body.expandtabs(4)
+            indent = len(expanded) - len(expanded.lstrip(' '))
+            # 列表的缩进以内容列为基准；再缩进四列才是代码。
+            while list_indents and body.strip() and indent < list_indents[-1]:
+                list_indents.pop()
+            content_indent = list_indents[-1] if list_indents else 0
+            logical = expanded[content_indent:]
+            indented_code = bool(body.strip()) and indent >= content_indent + 4
+            item = re.match(r"( *)(?:[-+*]|\d{1,9}[.)])([ \t]+)", expanded)
+            if item and not indented_code:
+                content_indent = item.end()
+                list_indents.append(content_indent)
+                logical = expanded[item.end():]
+            opener = re.match(r"[ ]{0,3}(`{3,}|~{3,})(.*)$", logical)
+            callout = re.match(r"[ ]{0,3}>[ \t]?\[![A-Za-z0-9_-]+\][+-]?", body)
+            if callout and not quote and not indented_code:
+                callout_end = mask_callout(lines, index, out, offset)
+            elif opener and not (opener[1][0] == "`" and "`" in opener[2]):
+                fence = (opener[1][0], len(opener[1]), content_indent)
                 blank_span(out, offset, offset + len(line))
             else:
                 if not body.strip():
                     quote = False
                 if re.match(r"[ ]{0,3}>", body):
                     quote = True
-                if quote:
+                if quote or indented_code:
                     blank_span(out, offset, offset + len(line))
         offset += len(line)
     return "".join(out)
+
+
+def mask_callout(lines: list[str], index: int, out: list[str], offset: int) -> int:
+    """去掉 callout 的外层引用标记，递归检查内部；映射回原始偏移。"""
+    inner = []
+    positions = []
+    while index < len(lines):
+        line = lines[index]
+        prefix = re.match(r"[ ]{0,3}>[ \t]?", line)
+        if not prefix and not line.strip():
+            break
+        start = prefix.end() if prefix else 0
+        blank_span(out, offset, offset + start)
+        for pos in range(start, len(line)):
+            inner.append(line[pos])
+            positions.append(offset + pos)
+        offset += len(line)
+        index += 1
+    inner_text = ''.join(inner)
+    marker = re.match(r"\[![A-Za-z0-9_-]+\][+-]?", inner_text)
+    inner_text = MASK_CHAR * marker.end() + inner_text[marker.end():]
+    for pos, char in zip(positions, preprocess(inner_text)):
+        out[pos] = char
+    return index
 
 
 def mask_inline_code(text: str) -> str:
@@ -130,6 +193,11 @@ def mask_inline_code(text: str) -> str:
 def mask_link_targets(text: str) -> str:
     """保留标签，屏蔽嵌套及转义括号组成的目标和可选标题。"""
     out = list(text)
+    for match in re.finditer(r"!?\[\[(?P<target>[^\]\n|]+)(?:\|[^\]\n]*)?\]\]", text):
+        if '|' in match[0] and not match[0].startswith('!'):
+            blank_span(out, match.start(), match.end('target') + 1)
+        else:
+            blank_span(out, match.start(), match.end())
     for match in re.finditer(r"\]\(", text):
         start = match.end() - 1
         depth = 1
@@ -161,6 +229,11 @@ def preprocess(raw: str) -> str:
     text = mask_link_targets(text)
     for pat in MASK_PATTERNS:
         text = blank_out(text, pat)
+    out = list(text)
+    for pattern in IDENTIFIERS:
+        for match in pattern.finditer(text):
+            blank_span(out, match.start('value'), match.end('value'))
+    text = ''.join(out)
     return text
 
 
@@ -193,6 +266,20 @@ RULES: list[tuple[str, str, re.Pattern, str, str]] = [
         "改用「」（本项目偏好）或 “”，全文统一（SKILL 3.3）",
     ),
     (
+        "bad-ellipsis",
+        "error",
+        re.compile(rf"。{{3,}}|(?<=[{CJK}])\.{{3,}}|\.{{3,}}(?=[{CJK}])"),
+        "省略号写法错误",
+        "改用 ……（U+2026 连用两次，SKILL 3.2）",
+    ),
+    (
+        "dup-punct",
+        "error",
+        re.compile(rf"([！？。，、；：])\1|[！？]{{3,}}|(?<=[{CJK}])[!?]{{2,}}"),
+        "标点堆叠",
+        "只保留一个；允许 ？！ 单次并用（SKILL 3.5）",
+    ),
+    (
         "ascii-comma",
         "error",
         re.compile(rf"(?<=[{CJK}])[,;!?]"),
@@ -216,23 +303,9 @@ RULES: list[tuple[str, str, re.Pattern, str, str]] = [
     (
         "ascii-period",
         "error",
-        re.compile(rf"(?<=[{CJK}])\.(?![A-Za-z0-9]{{1,5}}\b)"),
+        re.compile(rf"(?<=[{CJK}])\.(?!\.)(?![A-Za-z0-9]{{1,5}}\b)"),
         "中文后面跟了半角句号",
         "改成全角 。（SKILL 3.2）",
-    ),
-    (
-        "dup-punct",
-        "error",
-        re.compile(rf"([！？。，、；：])\1|[！？]{{3,}}|(?<=[{CJK}])[!?]{{2,}}"),
-        "标点堆叠",
-        "只保留一个；允许 ？！ 单次并用（SKILL 3.5）",
-    ),
-    (
-        "bad-ellipsis",
-        "error",
-        re.compile(rf"。{{3,}}|(?<=[{CJK}])\.{{3,}}|\.{{3,}}(?=[{CJK}])"),
-        "省略号写法错误",
-        "改用 ……（U+2026 连用两次，SKILL 3.2）",
     ),
     (
         "single-ellipsis",
@@ -244,7 +317,7 @@ RULES: list[tuple[str, str, re.Pattern, str, str]] = [
     (
         "bad-dash",
         "error",
-        re.compile(rf"(?<=[{CJK}])-{{2,}}|-{{2,}}(?=[{CJK}])|(?<=[{CJK}])—(?!—)(?=[{CJK}])"),
+        re.compile(rf"(?<=[{CJK}])-{{2,}}|-{{2,}}(?=[{CJK}])|(?<!—)—(?!—)(?=[{CJK}])|(?<=[{CJK}])—(?!—)"),
         "破折号写法错误",
         "改用 ——（两个 U+2014，SKILL 3.2）",
     ),
@@ -272,7 +345,7 @@ RULES: list[tuple[str, str, re.Pattern, str, str]] = [
     (
         "heading-trailing-punct",
         "error",
-        re.compile(r"^#{1,6} .*[。，、；：]\s*$", re.M),
+        re.compile(r"^[ ]{0,3}#{1,6}[ \t]+.*[。，、；：](?:[ \t]+#+)?[ \t]*$", re.M),
         "标题末尾有点号",
         "删掉；？！」》…… 可保留（SKILL 3.5）",
     ),
@@ -286,9 +359,9 @@ RULES: list[tuple[str, str, re.Pattern, str, str]] = [
     (
         "range-hyphen",
         "warn",
-        re.compile(r"[\d%°][ \t]*[-~～—][ \t]*\d"),
+        re.compile(r"[\d%°][ \t]*[-~—][ \t]*\d"),
         "区间可能用了 hyphen、~ 或 em dash 连接",
-        "中文区间只用「至」或 en dash –；ISO 日期里的 - 不用改（SKILL 3.6）",
+        "本项目偏好「至」或 en dash –；全角浪纹线 ～ 可保留，日期和编号里的 - 不用改（SKILL 3.6）",
     ),
     (
         "range-unit",
@@ -340,8 +413,9 @@ def consistency_checks(masked: str) -> list[dict]:
     out: list[dict] = []
 
     corner = len(re.findall(r"[「」『』]", masked))
-    # 英文缩写/所有格里的弯引号（it's、users'）不算中文弯引号信号
-    curly = len(re.findall(r"[“”]|(?<![A-Za-z])[‘’]", masked))
+    # 中文字符和中文句读标点都可提示所在语境；完整英文段落、所有格不参与统一。
+    quote_context = CJK + "，。；：！？、"
+    curly = len(re.findall(rf"(?<=[{quote_context}])[ \t]*[“”‘’]|[“”‘’][ \t]*(?=[{quote_context}])", masked))
     if corner and curly:
         out.append({
             "rule": "quote-style-mix",
@@ -374,32 +448,40 @@ def consistency_checks(masked: str) -> list[dict]:
 # 主流程
 # --------------------------------------------------------------------------- #
 
-def check(raw: str) -> list[dict]:
+def check(raw: str, profile: str = "general") -> list[dict]:
+    if profile not in ("general", "finance"):
+        raise ValueError(f"Unknown profile: {profile}")
     masked = preprocess(raw)
     findings: list[dict] = []
     seen_error: set[int] = set()
 
     for rule_id, level, pattern, why, fix in RULES:
+        if profile != "finance" and rule_id in FINANCE_RULES:
+            continue
         for m in pattern.finditer(masked):
             hit = m.group()
             if not hit.strip() or set(hit) <= {MASK_CHAR}:
                 continue
             if rule_id in ("range-hyphen", "ascii-comma") and in_iso_date(masked, m.start(), m.end()):
                 continue
-            if level == "error":
-                # 同一位置只报一条，避免「。。。」同时命中堆叠和省略号两条规则
-                if m.start() in seen_error:
+            hit_level, hit_fix = level, fix
+            if rule_id == "bad-dash" and hit == "--" and re.match(r"[A-Za-z]", masked[m.end():]):
+                hit_level = "warn"
+                hit_fix = "可能是命令行参数；确认是参数时保留并用行内代码标记，确认是破折号时改用 ——（SKILL 3.2）"
+            if hit_level == "error":
+                # 先报告省略号、堆叠等具体问题，再忽略与其重叠的普通标点命中。
+                if any(pos in seen_error for pos in range(m.start(), m.end())):
                     continue
-                seen_error.add(m.start())
+                seen_error.update(range(m.start(), m.end()))
             line, col = line_col(raw, m.start())
             findings.append({
                 "rule": rule_id,
-                "level": level,
+                "level": hit_level,
                 "line": line,
                 "col": col,
                 "text": snippet(raw, m.start(), m.end()),
                 "why": why,
-                "fix": fix,
+                "fix": hit_fix,
             })
 
     findings.extend(consistency_checks(masked))
@@ -413,13 +495,15 @@ def main() -> int:
     ap.add_argument("--level", choices=["error", "warn", "all"], default="all",
                     help="只显示指定级别，默认全部")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
+    ap.add_argument("--profile", choices=["general", "finance"], default="general",
+                    help="默认 general；finance 额外检查千位分隔符和比较符号空格")
     ap.add_argument("--fail-on", choices=["error", "warn"], default=None,
                     help="error：有 error 时返回 1；warn：有 error 或 warn 时返回 1")
     args = ap.parse_args()
 
     raw = sys.stdin.read() if args.path == "-" else Path(args.path).read_text(encoding="utf-8")
     raw = raw.replace("\r\n", "\n").replace("\r", "\n")  # 统一换行，不依赖调用方是否已归一化
-    all_findings = check(raw)
+    all_findings = check(raw, profile=args.profile)
 
     findings = all_findings
     if args.level != "all":
