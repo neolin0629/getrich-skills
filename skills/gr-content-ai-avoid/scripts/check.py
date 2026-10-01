@@ -31,12 +31,11 @@ SEV_ORDER = {"high": 0, "mid": 1, "low": 2}
 
 EMOJI_RE = re.compile(
     "["
-    "\U0001F300-\U0001FAFF"
+    "\U0001F300-\U0001F3FA"  # 排除 U+1F3FB–1F3FF 肤色修饰符。
+    "\U0001F400-\U0001FAFF"
     "\U0001F000-\U0001F2FF"
     "\U00002600-\U000027BF"
     "\U00002B00-\U00002BFF"
-    "\U0000FE0F"
-    "\U00002190-\U000021FF"
     "]"
 )
 
@@ -264,8 +263,37 @@ class Hit:
         }
 
 
-def scan_lexicon(text: str, lexicon: dict, active: set[str]) -> list[Hit]:
-    """词表扫描。全局掩码去重：同一段字符只归给一条规则（按严重度优先）。"""
+def _lexicon_matches(text: str, cfg: dict) -> list[tuple[int, int, str, str]]:
+    """词条与正则统一按匹配长度降序、原文位置升序排列，供定位和计数复用。"""
+    matches: list[tuple[int, int, str, str]] = []
+    sev = cfg.get("severity", "mid")
+    for word in cfg.get("words", []):
+        if "…" in word or not word.strip():
+            continue
+        pos = 0
+        while True:
+            start = text.find(word, pos)
+            if start < 0:
+                break
+            matches.append((start, start + len(word), "", sev))
+            pos = start + 1
+    for rx in cfg.get("regex", []):
+        try:
+            cre = re.compile(rx["pattern"])
+        except re.error:
+            continue
+        for match in cre.finditer(text):
+            start, end = match.span(rx.get("match_group", 0))
+            matches.append((start, end, rx.get("desc", ""), rx.get("severity", sev)))
+    return sorted(matches, key=lambda match: (-(match[1] - match[0]), match[0]))
+
+
+def scan_lexicon(text: str, lexicon: dict, active: set[str],
+                 claimed: bytearray | None = None) -> list[Hit]:
+    """词表扫描。全局掩码去重：同一段字符只归给一条规则（按严重度优先）。
+
+    claimed 标记已被其他规则词条认领的字符；整体落在其中的匹配不再重复定位。
+    """
     mask = bytearray(len(text))
     hits: list[Hit] = []
 
@@ -278,58 +306,28 @@ def scan_lexicon(text: str, lexicon: dict, active: set[str]) -> list[Hit]:
         cfg = lexicon[rule]
         if cfg.get("is_positive_signal"):
             continue
-        sev = cfg.get("severity", "mid")
         hint = cfg.get("hint", "")
-        for w in sorted(cfg.get("words", []), key=len, reverse=True):
-            if "…" in w or not w.strip():
+        for start, end, desc, sev in _lexicon_matches(text, cfg):
+            if any(mask[start:end]) or _is_claimed(claimed, start, end):
                 continue
-            pos = 0
-            while True:
-                i = text.find(w, pos)
-                if i < 0:
-                    break
-                pos = i + 1
-                if any(mask[i:i + len(w)]):
-                    continue
-                for k in range(i, i + len(w)):
-                    mask[k] = 1
-                hits.append(Hit(rule, cfg["name"], sev, i, i + len(w), w, "", hint))
-        for rx in cfg.get("regex", []):
-            try:
-                cre = re.compile(rx["pattern"])
-            except re.error:
-                continue
-            for m in cre.finditer(text):
-                group = rx.get("match_group", 0)
-                start, end = m.span(group)
-                if any(mask[start:end]):
-                    continue
-                for k in range(start, end):
-                    mask[k] = 1
-                hits.append(Hit(rule, cfg["name"], sev, start, end,
-                                m.group(group), rx.get("desc", ""), hint))
+            for k in range(start, end):
+                mask[k] = 1
+            hits.append(Hit(rule, cfg["name"], sev, start, end, text[start:end], desc, hint))
     return hits
 
 
-def count_non_overlapping_matches(text: str, cfg: dict) -> int:
-    """按最长优先统计单条规则的词和正则，避免嵌套表达重复计数。"""
-    spans: list[tuple[int, int]] = []
-    for word in sorted(cfg.get("words", []), key=len, reverse=True):
-        if "…" in word or not word.strip():
-            continue
-        spans.extend((m.start(), m.end()) for m in re.finditer(re.escape(word), text))
-    for rx in cfg.get("regex", []):
-        try:
-            cre = re.compile(rx["pattern"])
-        except re.error:
-            continue
-        group = rx.get("match_group", 0)
-        spans.extend(m.span(group) for m in cre.finditer(text))
+def _is_claimed(claimed: bytearray | None, start: int, end: int) -> bool:
+    """匹配整体位于已认领字符内才跳过；只共用部分字符的相邻词照常计数。"""
+    return claimed is not None and end > start and all(claimed[start:end])
 
+
+def count_non_overlapping_matches(text: str, cfg: dict,
+                                  claimed: bytearray | None = None) -> int:
+    """与定位共用最长优先、位置优先的匹配；跳过重叠及整体已认领的匹配。"""
     mask = bytearray(len(text))
     count = 0
-    for start, end in sorted(spans, key=lambda span: (-(span[1] - span[0]), span[0])):
-        if any(mask[start:end]):
+    for start, end, _, _ in _lexicon_matches(text, cfg):
+        if any(mask[start:end]) or _is_claimed(claimed, start, end):
             continue
         for i in range(start, end):
             mask[i] = 1
@@ -490,7 +488,7 @@ def scan_empty_headers(text: str, active: set[str]) -> list[Hit]:
 
 
 def compute_metrics(text: str, cfg_all: dict, genre: str, active: set[str],
-                    lexicon: dict) -> list[dict]:
+                    lexicon: dict, claimed: bytearray | None = None) -> list[dict]:
     prose = prose_view(text)
     sents = split_sentences(prose)
     lens = [content_len(s) for _, s in sents]
@@ -566,7 +564,7 @@ def compute_metrics(text: str, cfg_all: dict, genre: str, active: set[str],
     # W1 密度
     c = cfg_all.get("W1_per_1k", {})
     if "W1_per_1k" in active and "W1" in lexicon:
-        cnt = count_non_overlapping_matches(text, lexicon["W1"])
+        cnt = count_non_overlapping_matches(text, lexicon["W1"], claimed)
         d = cnt / k
         min_allowed = c.get("min_allowed_count", 0)
         bad = d > c.get("warn_above", 2.0) and cnt > min_allowed
@@ -578,7 +576,7 @@ def compute_metrics(text: str, cfg_all: dict, genre: str, active: set[str],
     if "W3" in lexicon and "W3" in active and sents:
         dens = lexicon["W3"].get("density_per_sentence", {})
         thr = dens.get(genre, dens.get("default", 0.25))
-        cnt = count_non_overlapping_matches(prose, lexicon["W3"])
+        cnt = count_non_overlapping_matches(prose, lexicon["W3"], claimed)
         d = cnt / len(sents)
         min_allowed = lexicon["W3"].get("min_allowed_count", 0)
         bad = d > thr and cnt > min_allowed
@@ -610,14 +608,24 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
 
     # 聚合规则独立扫描，避免跨规则掩码吞掉超标规则的定位。
     hits = scan_lexicon(text, cfg["lexicon"], active - aggregate_rules)
+    # 其他规则的完整词条（如「时代背景下」「尽管面临」）认领其字符，
+    # W1、W3 不再从中拆出「背景下」「尽管」重复计数和定位。
+    claimed = bytearray(len(text))
+    for h in hits:
+        if h.matched in cfg["lexicon"][h.rule].get("words", []):
+            claimed[h.start:h.end] = b"\x01" * (h.end - h.start)
     regex_hits = scan_regex_rules(text, cfg["regex_rules"], active, chars)
     # P2 的新提示冒号子规则与已有词表重叠时只保留原定位。
     p2_hits = [h for h in hits if h.rule == "P2"]
     hits += [h for h in regex_hits if h.rule != "P2_prompt_colon" or not any(
         h.start < existing.end and existing.start < h.end for existing in p2_hits)]
+    # 同一表达既命中完整 S8 句式又命中内部 C7 词时，保留信息更完整的句式。
+    s8_hits = [h for h in regex_hits if h.rule == "S8"]
+    hits = [h for h in hits if h.rule != "C7" or not any(
+        existing.start <= h.start and h.end <= existing.end for existing in s8_hits)]
     hits += scan_empty_headers(text, active)
 
-    metrics = compute_metrics(text, cfg["metrics"], genre, active, cfg["lexicon"])
+    metrics = compute_metrics(text, cfg["metrics"], genre, active, cfg["lexicon"], claimed)
 
     # 加严只提升已超阈值的 mid 项；依赖语义的 low 候选仍由人工判断。
     strict = set(cfg["genres"].get(genre, {}).get("strict", []))
@@ -631,7 +639,7 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
         if rule not in active or rule not in cfg["lexicon"]:
             continue
         scan_text = prose_view(text) if rule == "W3" else text
-        rule_hits = scan_lexicon(scan_text, {rule: cfg["lexicon"][rule]}, {rule})
+        rule_hits = scan_lexicon(scan_text, {rule: cfg["lexicon"][rule]}, {rule}, claimed)
         metric = metrics_by_key.get(rule)
         if metric and metric["flagged"]:
             hits.extend(rule_hits)
@@ -675,6 +683,7 @@ def analyze(raw: str, cfg: dict, genre: str) -> dict:
                    sum(1 for m in metrics if m["flagged"] and m["severity"] == "low"),
         },
         "strict": cfg["genres"].get(genre, {}).get("strict", []),
+        "focus": cfg["genres"].get(genre, {}).get("focus", []),
     }
 
 
@@ -716,6 +725,8 @@ def render(res: dict, source: str, cfg: dict) -> str:
         out.append("候选定位：" + "　".join(f"{k} {names.get(k,'')}({v})" for k, v in top))
     if res["strict"]:
         out.append(f"本体裁加严：{', '.join(res['strict'])}")
+    if res.get("focus"):
+        out.append(f"本体裁重点复核（不自动升级）：{', '.join(res['focus'])}")
 
     out.append("\n---\n")
     if res["manual_review"]:

@@ -25,6 +25,247 @@ def metric(result: dict, key: str) -> dict:
     return next(row for row in result["metrics"] if row["key"] == key)
 
 
+@pytest.mark.parametrize("raw", [
+    "我们不需要我们自己搭服务器。以下是三组对照数据。总结一下，成本下降了。",
+    "- 点赞\n- 需要我们确认\n",
+    "不需要我们。以下是三组数据。求点赞。",
+    "这个答案完全正确，这是一个好问题。",
+])
+def test_r1_normal_prose_does_not_fail_as_assistant_residue(raw):
+    proc, result = run_check(raw, fail_on="high")
+    assert proc.returncode == 0
+    assert not any(h["severity"] == "high" and h["rule"] in {"F4", "F6"}
+                   for h in result["hits"])
+
+
+@pytest.mark.parametrize("raw", ["需要我帮你整理吗？", "需要我展开哪部分吗？",
+                                      "以下是为你整理的版本。", "这是一个非常好的问题。"])
+def test_r1_assistant_residue_still_requires_priority_review(raw):
+    proc, result = run_check(raw, fail_on="high")
+    assert proc.returncode == 1
+    assert any(h["severity"] == "high" and h["rule"] in {"F4", "F6"}
+               for h in result["hits"])
+
+
+@pytest.mark.parametrize("raw, rule", [("总结一下，成本下降了。", "F4"),
+                                         ("这个答案完全正确。", "F6"), ("好问题。", "F6")])
+def test_r1_ambiguous_dialogue_remains_a_low_candidate(raw, rule):
+    proc, result = run_check(raw, fail_on="any")
+    assert proc.returncode == 1
+    assert [(h["rule"], h["severity"]) for h in result["hits"]] == [(rule, "low")]
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+@pytest.mark.parametrize("rule, body", [
+    ("W2", "模型具备泛化的能力。"),
+    ("S8", "投资是认知的镜子。"),
+    ("S8", "投资的底层逻辑是认知。"),
+])
+def test_r1_regex_locations_do_not_reach_into_previous_heading(newline, rule, body):
+    prefix = "## 能力建设" + newline * 2
+    raw = prefix + body
+    _, result = run_check(raw)
+    hit = next(h for h in result["hits"] if h["rule"] == rule)
+    assert hit["line"] == 3
+    assert hit["offset"] >= len(prefix)
+    assert "\n" not in hit["matched"] and "\r" not in hit["matched"]
+    assert raw[hit["offset"]:].startswith(hit["matched"])
+
+
+def test_r1_academic_preserves_necessary_written_expressions():
+    raw = "本文对样本进行了清洗，并加以讨论。模型具备泛化的能力。"
+    proc, result = run_check(raw, genre="academic", fail_on="high")
+    assert proc.returncode == 0
+    assert len([h for h in result["hits"] if h["rule"] == "W2"]) == 3
+    assert all(h["severity"] == "mid" for h in result["hits"] if h["rule"] == "W2")
+
+
+def test_r1_ordinary_ability_description_is_not_translationese():
+    _, result = run_check("## 能力建设\n\n团队的能力很强。")
+    assert not any(h["rule"] == "W2" for h in result["hits"])
+
+
+@pytest.mark.parametrize("raw, count", [("❤️", 1), ("⚠️", 1), ("👍🏻", 1),
+                                         ("👍🏿", 1), ("→", 0), ("A → B", 0),
+                                         ("❤️ 👍🏻 ⚠️", 3), ("\ufe0f🏻", 0)])
+def test_r1_emoji_density_ignores_modifiers_and_technical_arrows(raw, count):
+    _, result = run_check(raw)
+    assert metric(result, "F3")["value"].endswith(f"({count})")
+
+
+@pytest.mark.parametrize("genre, strict, focus", [
+    ("wechat", ["P5"], ["S7_punchline_rate", "C7"]),
+    ("xhs-short", [], ["P1", "P4", "C9"]),
+    ("xhs-long", [], ["P1", "P4"]),
+    ("weibo", [], ["P1", "P4"]),
+    ("zhihu", [], ["C5", "C2"]),
+    ("video", ["W3"], ["P1"]),
+    ("persona", [], ["R2", "R4", "P4"]),
+    ("copy", [], ["C9", "C5"]),
+    ("quant", [], ["C5", "F5", "R1", "C7"]),
+    ("academic", ["F1_dash_per_1k"], ["W1", "W2", "S5", "C5"]),
+])
+def test_r1_genre_report_separates_escalation_from_review_focus(genre, strict, focus):
+    _, result = run_check("普通正文。", genre=genre)
+    assert result["strict"] == strict
+    assert result["focus"] == focus
+    proc = subprocess.run([sys.executable, str(CHECK), "-", "--genre", genre],
+                          input="普通正文。", text=True, capture_output=True)
+    assert proc.returncode == 0
+    assert ("本体裁加严：" in proc.stdout) is bool(strict)
+    assert "本体裁重点复核（不自动升级）：" + ", ".join(focus) in proc.stdout
+
+
+def test_r1_wechat_escalates_checklist_but_keeps_semantic_candidate_low():
+    proc, result = run_check("三条建议：先核对来源。核心在于证据。", genre="wechat", fail_on="high")
+    assert proc.returncode == 1
+    assert next(h for h in result["hits"] if h["rule"] == "P5")["severity"] == "high"
+    assert next(h for h in result["hits"] if h["rule"] == "C7")["severity"] == "low"
+
+
+def test_r1_academic_still_escalates_excess_dashes():
+    raw = "甲——乙。丙——丁。"
+    proc, academic = run_check(raw, genre="academic", fail_on="high")
+    _, default = run_check(raw)
+    assert proc.returncode == 1
+    assert metric(academic, "F1")["severity"] == "high"
+    assert metric(default, "F1")["severity"] == "mid"
+
+
+@pytest.mark.parametrize("word", ["与此同时", "更重要的是", "值得注意的是"])
+def test_r1_shared_connectors_only_count_toward_w3(word):
+    _, result = run_check((word + "甲。") * 3)
+    assert metric(result, "W1")["value"].endswith("(0)")
+    assert metric(result, "W3")["value"].endswith("(3/3)")
+    assert [h["rule"] for h in result["hits"]] == ["W3"] * 3
+
+
+@pytest.mark.parametrize("word", ["赋能", "生态位"])
+def test_r1_shared_business_words_only_count_toward_c9(word):
+    _, result = run_check((word + "甲。") * 3)
+    assert metric(result, "W1")["value"].endswith("(0)")
+    assert [h["rule"] for h in result["hits"]] == ["C9"] * 3
+
+
+@pytest.mark.parametrize("raw", ["投资的底层逻辑是认知。", "投资的本质是认知。"])
+def test_r1_c7_inside_s8_expression_is_reported_once(raw):
+    _, result = run_check(raw)
+    assert [h["rule"] for h in result["hits"] if h["rule"] in {"S8", "C7"}] == ["S8"]
+
+
+def test_r1_standalone_c7_still_keeps_its_location():
+    raw = "底层逻辑。投资的本质是认知。"
+    _, result = run_check(raw)
+    assert [(h["rule"], h["offset"]) for h in result["hits"] if h["rule"] in {"S8", "C7"}] == [
+        ("C7", 0), ("S8", 5)]
+
+
+@pytest.mark.parametrize("word", ["综上所述", "由此可见", "由此可以看出"])
+def test_r2_summary_connectors_only_count_toward_w3(word):
+    _, result = run_check((word + "甲。") * 3)
+    assert metric(result, "W1")["value"].endswith("(0)")
+    assert metric(result, "W3")["value"].endswith("(3/3)")
+    assert [(h["rule"], h["matched"]) for h in result["hits"]] == [("W3", word)] * 3
+
+
+def test_r2_hedge_phrase_only_counts_toward_w5():
+    _, result = run_check("在某种程度上甲。" * 3)
+    assert metric(result, "W1")["value"].endswith("(0)")
+    assert [h["rule"] for h in result["hits"]] == ["W5"] * 3
+
+
+@pytest.mark.parametrize("phrase, owner, aggregate, empty_value", [
+    ("时代背景下", "C8", "W1", "(0)"),
+    ("宏大叙事", "C8", "W1", "(0)"),
+    ("深入探讨一下", "P2", "W1", "(0)"),
+    ("尽管面临", "P3", "W3", "(0/3)"),
+    ("虽然公开资料有限", "F5", "W3", "(0/3)"),
+])
+def test_r2_longer_phrase_owned_by_one_rule(phrase, owner, aggregate, empty_value):
+    _, result = run_check((phrase + "甲。") * 3)
+    assert metric(result, aggregate)["value"].endswith(empty_value)
+    assert [h["rule"] for h in result["hits"]] == [owner] * 3
+
+
+@pytest.mark.parametrize("raw, aggregate, value", [
+    ("背景下甲。" * 3, "W1", "(3)"),
+    ("尽管甲。" * 3, "W3", "(3/3)"),
+])
+def test_r2_standalone_aggregate_words_still_count(raw, aggregate, value):
+    _, result = run_check(raw)
+    assert metric(result, aggregate)["value"].endswith(value)
+
+
+@pytest.mark.parametrize("raw, aggregate, value, word", [
+    ("该政策旨在一定程度上缓解压力。" * 3, "W1", "(3)", "旨在"),
+    ("所以说到底还是钱。" * 3, "W3", "(3/3)", "所以说"),
+])
+def test_r2_partial_overlap_with_claimed_phrase_still_counts(raw, aggregate, value, word):
+    _, result = run_check(raw)
+    assert metric(result, aggregate)["value"].endswith(value)
+    assert [h["matched"] for h in result["hits"] if h["rule"] == aggregate] == [word] * 3
+
+
+def test_r2_claimed_offsets_align_with_prose_view():
+    raw = "# 尽管面临\n\n- 时代背景下\n\n尽管面临甲。尽管乙。尽管丙。\n"
+    _, result = run_check(raw)
+    assert metric(result, "W3")["value"].endswith("(2/3)")
+    assert [(h["rule"], h["line"], h["matched"]) for h in result["hits"]] == [
+        ("P3", 1, "尽管面临"), ("C8", 3, "时代背景下"), ("P3", 5, "尽管面临"),
+        ("W3", 5, "尽管"), ("W3", 5, "尽管")]
+
+
+def test_r2_skipped_owner_does_not_hide_aggregate_word():
+    _, result = run_check("深入探讨一下甲。" * 3, genre="video")
+    assert metric(result, "W1")["value"].endswith("(3)")
+    assert [h["rule"] for h in result["hits"]] == ["W1"] * 3
+
+
+def test_r2_aggregate_lexicons_do_not_share_words():
+    config = json.loads(CHECK.with_name("patterns.json").read_text(encoding="utf-8"))
+    w1, w3 = config["lexicon"]["W1"]["words"], config["lexicon"]["W3"]["words"]
+    assert not [(a, b) for a in w1 for b in w3 if a in b or b in a]
+
+
+def test_r3_equal_length_overlaps_use_same_count_and_locations():
+    proc, result = run_check("虽然而且。", fail_on="any")
+    assert proc.returncode == 1
+    assert metric(result, "W3")["value"] == "2.00 (2/1)"
+    assert [(h["matched"], h["offset"], h["line"]) for h in result["hits"]
+            if h["rule"] == "W3"] == [("虽然", 0, 1), ("而且", 2, 1)]
+    assert result["counts"]["W3"] == 2
+
+
+@pytest.mark.parametrize("raw, expected, offset", [
+    ("起到了稳定的作用和降低回撤的作用。", "起到了稳定的作用", 0),
+    ("对其进行分析并进行总结。", "对其进行", 0),
+    ("对数据进行分析并进行总结。", "对数据进行", 0),
+    ("起到了降低回撤的作用。", "起到了降低回撤的作用", 0),
+    ("对数据进行了分析。", "对数据进行了", 0),
+    ("我们对数据加以处理并进行了总结。", "对数据加以处理并进行了", 2),
+])
+@pytest.mark.parametrize("genre", ["default", "academic"])
+def test_r4_w2_stops_at_first_terminal_and_keeps_full_phrase(raw, expected, offset, genre):
+    prefix = "## 样本分析\r\n\r\n"
+    proc, result = run_check(prefix + raw, genre=genre, fail_on="high")
+    assert proc.returncode == 0
+    assert [(h["matched"], h["offset"], h["line"], h["severity"])
+            for h in result["hits"] if h["rule"] == "W2"] == [
+        (expected, len(prefix) + offset, 3, "mid")]
+
+
+@pytest.mark.parametrize("raw, expected, offset", [
+    ("相对而言我们对数据进行了清洗。", "对数据进行了", 6),
+    ("针对这个问题对模型进行了调整。", "对模型进行了", 6),
+    ("对于这批样本，我们对异常值进行了剔除。", "对异常值进行了", 9),
+    ("对其进行分析并进行总结。", "对其进行", 0),
+])
+def test_r5_w2_starts_at_nearest_preposition(raw, expected, offset):
+    _, result = run_check(raw)
+    assert [(h["matched"], h["offset"]) for h in result["hits"] if h["rule"] == "W2"] == [
+        (expected, offset)]
+
+
 def test_w1_below_density_threshold_does_not_fail_or_emit_hits():
     proc, result = run_check("甲" * 997 + "彰显。", genre="copy", fail_on="high")
 

@@ -27,6 +27,33 @@ def metric(result: dict, key: str) -> dict:
     return next(row for row in result["metrics"] if row["key"] == key)
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("claimed_prefix", [0, 2])
+def test_r3_lexicon_count_and_locations_share_overlap_priority(reverse, claimed_prefix):
+    raw = "虽然而且"
+    words = ["然而", "虽然", "而且"]
+    if reverse:
+        words.reverse()
+    cfg = {"name": "连接词", "words": words, "severity": "mid"}
+    claimed = bytearray([1] * claimed_prefix + [0] * (len(raw) - claimed_prefix))
+    hits = CHECK.scan_lexicon(raw, {"W3": cfg}, {"W3"}, claimed)
+    expected = [(0, "虽然"), (2, "而且")] if not claimed_prefix else [(1, "然而")]
+    assert [(h.start, h.matched) for h in hits] == expected
+    assert CHECK.count_non_overlapping_matches(raw, cfg, claimed) == len(hits)
+
+
+@pytest.mark.parametrize("words, regex, expected", [
+    (["然而"], [{"pattern": "虽然|而且"}], [(0, "虽然"), (2, "而且")]),
+    (["虽然", "而且"], [{"pattern": "然而且"}], [(1, "然而且")]),
+])
+def test_r3_words_and_regex_share_longest_then_position_priority(words, regex, expected):
+    raw = "虽然而且"
+    cfg = {"name": "连接词", "words": words, "regex": regex, "severity": "mid"}
+    hits = CHECK.scan_lexicon(raw, {"W3": cfg}, {"W3"})
+    assert [(h.start, h.matched) for h in hits] == expected
+    assert CHECK.count_non_overlapping_matches(raw, cfg) == len(hits)
+
+
 @pytest.mark.parametrize("block", [
     "```text\n这是一个非常好的问题。\n```",
     "~~~text\n这是一个非常好的问题。\n~~~",
