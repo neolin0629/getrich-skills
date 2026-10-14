@@ -34,6 +34,7 @@ npx skills remove -g --skill gr-search
 | `gr-search` | 同时调用豆包搜索和 Parallel，去重融合后按字符预算选取相关段落，支持图片搜索与正文抓取 |
 | `gr-chinese-typography-rules` | 检查或统一中文排版，覆盖中英文空格、标点、引号、数字、日期和金融表达，附机械自检脚本 |
 | `gr-content-ai-avoid` | 保留事实与作者风格，按 6 层、39 条规则减少套话，提供脚本候选与人工复核 |
+| `gr-content-review` | 按承诺、证据、立场、读者四问评审内容，给最多三个优先项和最小修改，不改写全文 |
 | `gr-ob-fix-color-tags` | 用全角括号包裹 Obsidian 笔记中的十六进制颜色代码（`#FFFFFF` → `（#FFFFFF）`），避免被识别为标签；处理前会询问目标目录 |
 | `gr-ob-rm-prompts-formatter` | 批量删除 Obsidian 笔记开头的 YAML frontmatter，默认处理 `prompts/` 目录，可指定其他目录 |
 
@@ -44,7 +45,7 @@ npx skills remove -g --skill gr-search
 使用 gr-chinese-typography-rules 检查这篇稿子的排版
 ```
 
-`gr-chinese-typography-rules` 负责排版，`gr-content-ai-avoid` 负责表达；创作中文内容时可配合使用。
+`gr-chinese-typography-rules` 负责排版，`gr-content-ai-avoid` 负责表达，`gr-content-review` 负责内容；创作中文内容时可配合使用。
 
 两个 `gr-ob-*` Skill 依赖 shell 命令批量改写文件，仅支持 macOS / Linux。`gr-ob-rm-prompts-formatter` 是破坏性操作，执行前请确认目标目录已纳入 Git 且工作区干净，或已提前备份。
 
@@ -53,6 +54,10 @@ npx skills remove -g --skill gr-search
 ### gr-search：兼顾信源覆盖和上下文预算
 
 一次调用并行检索豆包和 Parallel：豆包补中文站点、结构化直答和行业过滤，Parallel 补英文与长尾信源。两路结果等权融合，按问题选取相关正文段落，避免大段搜索结果占满上下文。全量结果保存在本地 JSON 中，追问时可直接读取未展开的内容。跨 URL 只合并标题与正文完全一致的结果，相似页面之间的版本、条件和措辞差异都会保留，便于核对。
+
+### gr-content-review：只评内容，修改留给作者
+
+按承诺是否兑现、证据能否支撑结论、立场与细节是否保留、读者能否读懂四个问题评审稿件。每轮最多三个优先项，每项写位置、问题、影响和最小修改，另列值得保留的表达。本人写作的稿件只给修改方向，不替作者重写，也不编造经历、数据或来源。不打分、不预测爆款；排版、格式、去 AI 味和平台风险按问题转交对应 Skill。
 
 ### gr-chinese-typography-rules：统一格式时保留原意和技术内容
 
@@ -107,12 +112,14 @@ python3 "$GR/scripts/gr_search.py" config migrate-defaults --apply
 ├── skills/                   # 分发给 Agent 的 Skill
 │   ├── gr-chinese-typography-rules/
 │   ├── gr-content-ai-avoid/
+│   ├── gr-content-review/
 │   ├── gr-ob-fix-color-tags/
 │   ├── gr-ob-rm-prompts-formatter/
 │   └── gr-search/
 ├── tests/                    # 测试，不随 Skill 分发
 │   ├── gr-chinese-typography-rules/
 │   ├── gr-content-ai-avoid/
+│   ├── gr-content-review/
 │   └── gr-search/
 └── prompts/                  # 个人提示词库，与 Skill 无关
 ```

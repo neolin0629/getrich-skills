@@ -11,12 +11,13 @@
   "plugins": [
     {
       "name": "getrich-skills",
-      "description": "All GetRich skills: dual-source web search, Chinese typography and writing review, and Obsidian note cleanup.",
+      "description": "All GetRich skills: dual-source web search, Chinese typography, writing and content review, and Obsidian note cleanup.",
       "source": "./",
       "strict": false,
       "skills": [
         "./skills/gr-chinese-typography-rules",
         "./skills/gr-content-ai-avoid",
+        "./skills/gr-content-review",
         "./skills/gr-ob-fix-color-tags",
         "./skills/gr-ob-rm-prompts-formatter",
         "./skills/gr-search"
